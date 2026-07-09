@@ -671,6 +671,10 @@ h2 {
 .productPanel {
   position: sticky;
   top: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - (var(--space-lg) * 2));
+  overflow: hidden;
 }
 
 .panel {
@@ -1046,10 +1050,11 @@ h2 {
 }
 
 .suggestionList {
+  flex: 0 1 auto;
   display: grid;
   gap: var(--space-xs);
   margin-top: var(--space-sm);
-  max-height: min(34vh, 360px);
+  max-height: clamp(180px, calc(100vh - 360px), 360px);
   overflow: auto;
   scrollbar-gutter: stable;
   scrollbar-color: var(--color-soft) var(--color-canvas-raised);
@@ -1139,7 +1144,13 @@ h2 {
 }
 
 .productPanel .denseList {
-  max-height: min(28vh, 320px);
+  max-height: clamp(220px, calc(100vh - 360px), 520px);
+}
+
+.productResults {
+  flex: 1 1 auto;
+  min-height: 0;
+  scroll-margin-top: var(--space-lg);
 }
 
 .item {
@@ -1986,6 +1997,8 @@ tbody tr:hover {
 
   .productPanel {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 
   .orderFeedBar {

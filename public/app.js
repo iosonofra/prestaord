@@ -68,6 +68,7 @@ const els = {
   resetOrderFilters: document.querySelector('#resetOrderFilters'),
   productSearch: document.querySelector('#productSearch'),
   productTemplateSuggestions: document.querySelector('#productTemplateSuggestions'),
+  productResults: document.querySelector('#productResults'),
   searchOrders: document.querySelector('#searchOrders'),
   searchProducts: document.querySelector('#searchProducts'),
   selectVisibleOrders: document.querySelector('#selectVisibleOrders'),
@@ -489,6 +490,7 @@ function renderProductTemplateSuggestions(products, query) {
     });
     els.productTemplateSuggestions.appendChild(button);
   }
+  scrollProductPanelIntoView();
 }
 
 async function loadProductTemplateSuggestions() {
@@ -921,6 +923,17 @@ function focusEditWorkspace(target = 'rows') {
       window.setTimeout(() => els.productSearch.focus({ preventScroll: true }), 220);
     }
   }, 80);
+}
+
+function scrollProductPanelIntoView() {
+  if (!els.productPanel) return;
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  window.requestAnimationFrame(() => {
+    els.productPanel.scrollIntoView({
+      behavior: reduceMotion ? 'auto' : 'smooth',
+      block: 'start',
+    });
+  });
 }
 
 function updateReplaceState() {
@@ -1561,8 +1574,13 @@ async function searchProducts(autoSelectId = '', options = {}) {
   const q = els.productSearch.value.trim();
   const requestId = options.requestId || ++state.productSearchRequestId;
   els.productTemplateSuggestions.hidden = true;
-  if (!options.silent) setStatus('Ricerca prodotti...');
-  else els.products.innerHTML = '<div class="item"><span class="itemTitle">Nessun suggerimento locale</span><span class="itemMeta">Cerco automaticamente su PrestaShop...</span></div>';
+  if (!options.silent) {
+    setStatus('Ricerca prodotti...');
+    els.products.innerHTML = '<div class="item"><span class="itemTitle">Ricerca prodotti in corso...</span><span class="itemMeta">Interrogo PrestaShop per il prodotto destinazione.</span></div>';
+    scrollProductPanelIntoView();
+  } else {
+    els.products.innerHTML = '<div class="item"><span class="itemTitle">Nessun suggerimento locale</span><span class="itemMeta">Cerco automaticamente su PrestaShop...</span></div>';
+  }
   const { products } = await api(`/api/products?q=${encodeURIComponent(q)}`);
   if (options.expectedQuery && options.expectedQuery !== els.productSearch.value.trim()) return;
   if (requestId !== state.productSearchRequestId) return;
