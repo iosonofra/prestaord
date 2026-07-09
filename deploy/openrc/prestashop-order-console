@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+name="prestashop-order-console"
+description="PrestaShop order product swapper"
+
+directory="/opt/prestashop-order-console"
+command="/usr/bin/node"
+command_args="src/server.js"
+command_user="prestashop-console:prestashop-console"
+
+pidfile="/run/${RC_SVCNAME}.pid"
+command_background="yes"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.err"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+  checkpath --directory --owner prestashop-console:prestashop-console --mode 0755 /opt/prestashop-order-console
+  checkpath --directory --owner prestashop-console:prestashop-console --mode 0755 /opt/prestashop-order-console/backups
+  checkpath --directory --owner prestashop-console:prestashop-console --mode 0755 /opt/prestashop-order-console/logs
+}

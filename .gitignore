@@ -1,0 +1,13 @@
+node_modules/
+.npm-cache/
+
+.env
+app-config.json
+order-cache.json
+
+backups/
+logs/
+
+*.log
+*.zip
+dist/

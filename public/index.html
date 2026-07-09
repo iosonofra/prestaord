@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gestione prodotti ordine PrestaShop</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="appShell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brandMark">PS</span>
+          <span>
+            <strong>Order Console</strong>
+            <small>PrestaShop 1.7.6.5</small>
+          </span>
+        </div>
+        <nav class="sideNav" aria-label="Sezioni app">
+          <button id="ordersPageButton" class="navButton active" type="button" aria-current="page">Ordini</button>
+          <button id="settingsPageButton" class="navButton" type="button">Impostazioni</button>
+          <button id="logsPageButton" class="navButton" type="button">Log</button>
+        </nav>
+        <div class="sidebarMeta" aria-label="Stato console">
+          <span>Console locale</span>
+          <strong id="sidebarCacheMeta">Cache da verificare</strong>
+        </div>
+      </aside>
+
+      <main class="mainArea">
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Ordini</h1>
+            <p class="pageLead">Seleziona, simula e conferma sostituzioni prodotto sugli ordini PrestaShop.</p>
+          </div>
+          <div class="topMeta">
+            <div class="topContext" aria-label="Contesto operativo">
+              <span id="topCacheMeta">Cache non verificata</span>
+              <span id="topSelectionMeta">Nessuna selezione</span>
+            </div>
+            <div class="status" id="status" role="status" aria-live="polite">Pronto</div>
+          </div>
+        </header>
+
+        <section id="ordersPage" class="page">
+          <section class="operationBar" aria-label="Riepilogo operazione">
+            <div class="metric">
+              <span>Ordini</span>
+              <strong id="ordersCount">0</strong>
+            </div>
+            <div class="metric">
+              <span>Righe</span>
+              <strong id="rowsCount">0</strong>
+            </div>
+            <div class="metric targetMetric">
+              <span>Prodotto destinazione</span>
+              <strong id="targetProduct">Nessuno</strong>
+            </div>
+            <div class="metric simulationMetric">
+              <span>Verifica</span>
+              <strong id="simulationState">Non eseguita</strong>
+            </div>
+          </section>
+
+          <section class="flowSteps" aria-label="Avanzamento modifica">
+            <div class="flowStep active" data-step="orders">
+              <span>1</span>
+              <strong>Ordini</strong>
+            </div>
+            <div class="flowStep" data-step="rows">
+              <span>2</span>
+              <strong>Righe</strong>
+            </div>
+            <div class="flowStep" data-step="product">
+              <span>3</span>
+              <strong>Prodotto</strong>
+            </div>
+            <div class="flowStep" data-step="review">
+              <span>4</span>
+              <strong>Revisione</strong>
+            </div>
+          </section>
+
+          <section id="selectionActionBar" class="selectionActionBar" hidden aria-live="polite">
+            <div>
+              <strong id="selectionActionTitle">Nessuna selezione</strong>
+              <span id="selectionActionMeta">Seleziona ordini e righe per procedere.</span>
+            </div>
+            <div class="selectionActions">
+              <button id="barSelectSameRows" class="ghostButton" type="button" disabled>Righe uguali</button>
+              <button id="barSimulateButton" type="button" disabled hidden>Simula</button>
+              <button id="barPreviewButton" class="primary" type="button" disabled>Modifica</button>
+            </div>
+          </section>
+
+          <section id="orderFeedBar" class="orderFeedBar" aria-label="Filtri ricerca ordini">
+            <div>
+              <h2>Filtra ordini</h2>
+              <p class="mutedText" id="orderFeedMeta">Carico gli ultimi ordini disponibili.</p>
+            </div>
+            <div class="orderFilterGrid">
+              <label class="compactField" for="orderSearch">
+                Riferimento ordine
+                <input id="orderSearch" placeholder="Es. KVB..." aria-label="Cerca ID o riferimento ordine" />
+              </label>
+              <label class="compactField" for="orderStateQuick">
+                Stato ordine
+                <select id="orderStateQuick" aria-label="Filtra per stato ordine">
+                  <option value="">Stati configurati</option>
+                </select>
+              </label>
+              <label class="compactField" for="orderDateFromQuick">
+                Dalla data
+                <input id="orderDateFromQuick" type="date" aria-label="Filtra ordini dalla data" />
+              </label>
+              <label class="compactField" for="orderDateToQuick">
+                Alla data
+                <input id="orderDateToQuick" type="date" aria-label="Filtra ordini alla data" />
+              </label>
+              <label class="compactField" for="orderFeedLimit">
+                Limite ordini
+                <select id="orderFeedLimit" aria-label="Numero ordini da mostrare">
+                  <option value="20">Primi 20 ordini</option>
+                  <option value="50">Primi 50 ordini</option>
+                  <option value="100">Primi 100 ordini</option>
+                  <option value="250">Primi 250 ordini</option>
+                  <option value="500">Primi 500 ordini</option>
+                  <option value="1000">Primi 1000 ordini</option>
+                </select>
+              </label>
+            </div>
+            <div class="orderFilterActions">
+              <button id="resetOrderFilters" class="ghostButton" type="button">Reimposta</button>
+              <button id="searchOrders" class="primary" type="button">Cerca ordini</button>
+            </div>
+          </section>
+
+          <section class="workGrid">
+            <div class="panel ordersPanel">
+              <div class="panelHeader">
+                <div>
+                  <h2 id="ordersListTitle">Carico ordini</h2>
+                  <p class="mutedText">Seleziona uno o piu ordini per vedere le righe modificabili.</p>
+                </div>
+                <div class="inlineActions">
+                  <button id="selectVisibleOrders" type="button">Seleziona visibili</button>
+                  <button id="clearOrders" class="ghostButton" type="button">Svuota</button>
+                </div>
+              </div>
+              <div class="tableWrap ordersTableWrap">
+                <table class="ordersTable">
+                  <thead>
+                    <tr>
+                      <th class="checkCol"></th>
+                      <th>ID ordine</th>
+                      <th>Riferimento</th>
+                      <th>Data ordine</th>
+                      <th>Cliente</th>
+                      <th>Prodotti</th>
+                      <th>Stato ordine</th>
+                      <th class="numCol">Importo totale</th>
+                    </tr>
+                  </thead>
+                  <tbody id="orders" aria-live="polite" aria-busy="true">
+                    <tr class="loadingRow" aria-hidden="true">
+                      <td class="checkCell"><span class="skeletonBox skeletonCheck"></span></td>
+                      <td><span class="skeletonLine skeletonShort"></span></td>
+                      <td><span class="skeletonLine skeletonPill"></span></td>
+                      <td><span class="skeletonLine skeletonMedium"></span></td>
+                      <td><span class="skeletonLine skeletonMedium"></span></td>
+                      <td><span class="skeletonLine skeletonProduct"></span></td>
+                      <td><span class="skeletonLine skeletonPill"></span></td>
+                      <td class="numCol"><span class="skeletonLine skeletonAmount"></span></td>
+                    </tr>
+                    <tr class="loadingRow" aria-hidden="true">
+                      <td class="checkCell"><span class="skeletonBox skeletonCheck"></span></td>
+                      <td><span class="skeletonLine skeletonShort"></span></td>
+                      <td><span class="skeletonLine skeletonPill"></span></td>
+                      <td><span class="skeletonLine skeletonMedium"></span></td>
+                      <td><span class="skeletonLine skeletonMedium"></span></td>
+                      <td>
+                        <span class="skeletonLine skeletonProduct"></span>
+                        <span class="skeletonLine skeletonProduct skeletonProductSub"></span>
+                      </td>
+                      <td><span class="skeletonLine skeletonPill"></span></td>
+                      <td class="numCol"><span class="skeletonLine skeletonAmount"></span></td>
+                    </tr>
+                    <tr class="loadingRow" aria-hidden="true">
+                      <td class="checkCell"><span class="skeletonBox skeletonCheck"></span></td>
+                      <td><span class="skeletonLine skeletonShort"></span></td>
+                      <td><span class="skeletonLine skeletonPill"></span></td>
+                      <td><span class="skeletonLine skeletonMedium"></span></td>
+                      <td><span class="skeletonLine skeletonMedium"></span></td>
+                      <td><span class="skeletonLine skeletonProduct"></span></td>
+                      <td><span class="skeletonLine skeletonPill"></span></td>
+                      <td class="numCol"><span class="skeletonLine skeletonAmount"></span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="panel rowsPanel" id="editWorkspace">
+              <div class="panelHeader rowsHeader">
+                <div>
+                  <h2 id="selectedOrderTitle">Nessun ordine selezionato</h2>
+                  <p class="mutedText" id="selectionSummary">0 ordini selezionati - 0 righe selezionate</p>
+                </div>
+                <div class="headerActions">
+                  <button id="selectSameRows" class="ghostButton" type="button" disabled>Righe uguali</button>
+                  <button id="simulateButton" class="ghostButton" type="button" disabled hidden>Simula</button>
+                  <button id="replaceButton" class="primary" type="button" disabled>Modifica</button>
+                </div>
+              </div>
+              <div class="tableWrap tallTable">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="checkCol"></th>
+                      <th>Ordine</th>
+                      <th>Prodotto attuale</th>
+                      <th>Riferimento</th>
+                      <th class="numCol">Qta</th>
+                      <th class="numCol">Unitario</th>
+                      <th class="numCol">Totale</th>
+                    </tr>
+                  </thead>
+                  <tbody id="orderRows">
+                    <tr>
+                      <td colspan="7" class="empty">Cerca e seleziona uno o piu ordini.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <section class="modifyPanel" id="previewPanel" hidden aria-labelledby="previewTitle">
+                <div class="modifyPanelHeader">
+                  <div>
+                    <h2 id="previewTitle">Modifica non ancora confermata</h2>
+                    <p class="mutedText" id="previewMeta">Rivedi prodotti, quantita e totali.</p>
+                  </div>
+                  <button id="closePreview" class="ghostButton" type="button">Chiudi</button>
+                </div>
+                <div id="previewWarning" class="warning" hidden></div>
+                <div class="modifyPanelBody">
+                  <div id="previewRows" class="previewList"></div>
+                </div>
+                <div class="modifyPanelFooter">
+                  <div class="confirmGate">
+                    <div id="simulationGate" class="gateNotice">Verifica tecnica richiesta prima della modifica reale.</div>
+                    <label class="confirmCheck">
+                      <input id="confirmCheck" type="checkbox" />
+                      <span>Confermo di aver verificato prodotto, quantita e prezzo mantenuto.</span>
+                    </label>
+                    <label class="confirmTextWrap" id="confirmTextWrap" for="confirmText" hidden>
+                      Scrivi CONFERMA
+                      <input id="confirmText" autocomplete="off" />
+                    </label>
+                  </div>
+                  <div class="modifyPanelActions">
+                    <button id="drawerSimulate" class="primary" type="button">Verifica e sblocca modifica</button>
+                    <button id="confirmReplace" class="primary" type="button" disabled>Applica modifica reale</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div class="panel productPanel">
+              <div class="panelHeader">
+                <h2>Prodotto destinazione</h2>
+              </div>
+              <div class="searchRow">
+                <input id="productSearch" placeholder="Nome, riferimento o ID" aria-label="Cerca prodotti" />
+                <button id="searchProducts" type="button">Cerca</button>
+              </div>
+              <div id="productTemplateSuggestions" class="suggestionList" hidden></div>
+              <div id="products" class="list denseList" aria-live="polite"></div>
+            </div>
+          </section>
+
+          <section class="panel resultPanel" id="resultPanel" hidden>
+            <div class="panelHeader">
+              <h2 id="resultTitle">Operazione completata</h2>
+              <button id="closeResult" type="button">Chiudi</button>
+            </div>
+            <div id="resultRows" class="list"></div>
+            <div class="resultActions" id="resultActions" hidden>
+              <button id="openLogsAfterResult" type="button">Apri log</button>
+              <button id="copyResultSummary" type="button">Copia riepilogo</button>
+              <button id="newOperation" type="button">Nuova operazione</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="settingsPage" class="page" hidden>
+          <form id="settingsForm" class="settingsStack">
+            <section class="panel settingsOverview" aria-label="Riepilogo impostazioni">
+              <div>
+                <h2>Impostazioni operative</h2>
+                <p class="mutedText">Configura connessione, stati ordine e cache senza uscire dal flusso di lavoro.</p>
+              </div>
+              <div class="settingsSummaryGrid">
+                <span class="settingsSummaryPill" id="settingsConnectionSummary">Connessione da verificare</span>
+                <span class="settingsSummaryPill" id="settingsStatesSummary">Stati non caricati</span>
+                <span class="settingsSummaryPill" id="settingsCacheSummary">Cache non verificata</span>
+              </div>
+            </section>
+
+            <section class="panel settingsSection">
+              <div class="settingsSectionHeader">
+                <div>
+                  <h2>Connessione PrestaShop</h2>
+                  <p class="mutedText">Dati Webservice usati per cercare ordini, prodotti e stati.</p>
+                </div>
+                <span class="settingsBadge">Obbligatorio</span>
+              </div>
+              <div class="settingsGrid">
+                <div class="fieldWide">
+                  <label for="baseUrl">URL negozio</label>
+                  <input id="baseUrl" placeholder="https://www.tuo-negozio.it" autocomplete="url" />
+                  <p class="helperText">Inserisci il dominio del negozio, senza aggiungere <strong>/api</strong>.</p>
+                </div>
+                <div class="fieldWide">
+                  <label for="apiKey">API key</label>
+                  <div class="inputWithAction">
+                    <input id="apiKey" type="password" placeholder="Chiave Webservice PrestaShop" autocomplete="off" />
+                    <button type="button" id="showApiKey">Mostra key</button>
+                  </div>
+                  <p class="helperText">La chiave deve avere accesso alle risorse ordini, prodotti, clienti e stati ordine.</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel settingsSection">
+              <div class="settingsSectionHeader">
+                <div>
+                  <h2>Stati e filtri ordine</h2>
+                  <p class="mutedText" id="settingsDefaultSummary">Seleziona gli stati utilizzabili nella ricerca e nella cache.</p>
+                </div>
+                <button id="refreshOrderStates" type="button">Carica stati</button>
+              </div>
+              <div id="orderStatesList" class="choiceGrid" aria-live="polite">
+                <span class="mutedText">Carica gli stati da PrestaShop.</span>
+              </div>
+              <div class="settingsGrid settingsGridSpaced">
+                <div>
+                  <label for="defaultOrderState">Stato predefinito</label>
+                  <select id="defaultOrderState">
+                    <option value="">Carica prima gli stati</option>
+                  </select>
+                  <p class="helperText">Usato come filtro iniziale nella pagina ordini.</p>
+                </div>
+                <div>
+                  <label for="orderLimit">Limite risultati</label>
+                  <select id="orderLimit">
+                    <option value="20">Primi 20 ordini</option>
+                    <option value="50">Primi 50 ordini</option>
+                    <option value="100">Primi 100 ordini</option>
+                    <option value="250">Primi 250 ordini</option>
+                    <option value="500">Primi 500 ordini</option>
+                    <option value="1000">Primi 1000 ordini</option>
+                  </select>
+                  <p class="helperText">Imposta quanti ordini mostrare nella lista principale.</p>
+                </div>
+                <div>
+                  <label for="orderDateFrom">Data da</label>
+                  <input id="orderDateFrom" type="date" />
+                </div>
+                <div>
+                  <label for="orderDateTo">Data a</label>
+                  <input id="orderDateTo" type="date" />
+                </div>
+              </div>
+            </section>
+
+            <section class="panel settingsSection cachePanel">
+              <div class="settingsSectionHeader">
+                <div>
+                  <h2>Cache ordini</h2>
+                  <p class="mutedText" id="cacheStatus">Cache non ancora sincronizzata.</p>
+                </div>
+                <button id="syncOrderCache" type="button">Sincronizza ora</button>
+              </div>
+              <div class="syncOptions">
+                <label class="confirmCheck settingToggle">
+                  <input id="cacheAutoSync" type="checkbox" />
+                  <span>
+                    <strong>Sync dopo salvataggio</strong>
+                    <small>Avvia una sincronizzazione completa quando salvi le impostazioni.</small>
+                  </span>
+                </label>
+                <label class="confirmCheck settingToggle">
+                  <input id="cacheHourlySync" type="checkbox" />
+                  <span>
+                    <strong>Sync oraria incrementale</strong>
+                    <small>Ogni ora controlla nuovi ordini e aggiunge solo quelli mancanti.</small>
+                  </span>
+                </label>
+              </div>
+              <p id="saveSyncNotice" class="settingsNotice" hidden>Salvando le impostazioni partirà anche la sincronizzazione completa della cache.</p>
+              <div id="cacheProgress" class="cacheProgress" hidden aria-live="polite">
+                <div class="cacheProgressHeader">
+                  <strong id="cacheProgressTitle">Sincronizzazione ordini</strong>
+                  <span id="cacheProgressMeta">In attesa...</span>
+                </div>
+                <div class="progressTrack" aria-hidden="true">
+                  <span id="cacheProgressBar"></span>
+                </div>
+                <div id="cacheProgressDetails" class="cacheProgressDetails"></div>
+              </div>
+              <div class="cacheGrid">
+                <div>
+                  <label for="cacheBatchSize">Ordini per batch</label>
+                  <select id="cacheBatchSize">
+                    <option value="50">50 ordini</option>
+                    <option value="60">60 ordini</option>
+                    <option value="80">80 ordini</option>
+                    <option value="100">100 ordini</option>
+                  </select>
+                  <p class="helperText">50-100 evita richieste troppo pesanti al Webservice.</p>
+                </div>
+                <div>
+                  <label for="cacheMaxOrders">Massimo ordini in cache</label>
+                  <select id="cacheMaxOrders">
+                    <option value="100">100 ordini</option>
+                    <option value="250">250 ordini</option>
+                    <option value="500">500 ordini</option>
+                    <option value="1000">1000 ordini</option>
+                  </select>
+                  <p class="helperText">Limite locale per mantenere rapida la ricerca.</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel settingsSection">
+              <div class="settingsSectionHeader">
+                <div>
+                  <h2>Sicurezza locale</h2>
+                  <p class="mutedText">Protegge l'app sul computer dove viene eseguita.</p>
+                </div>
+                <span class="settingsBadge subtle">Opzionale</span>
+              </div>
+              <div class="settingsGrid">
+                <div class="fieldWide">
+                  <label for="appPassword">Password locale app</label>
+                  <input id="appPassword" type="password" placeholder="Vuota = nessuna password" autocomplete="new-password" />
+                  <p class="helperText">Se salvi questo campo vuoto, la password locale viene disattivata.</p>
+                </div>
+                <label class="confirmCheck settingToggle fieldWide">
+                  <input id="requireConfirmCheck" type="checkbox" />
+                  <span>
+                    <strong>Richiedi conferma manuale prima della modifica reale</strong>
+                    <small>Mostra il checkbox "Confermo di aver verificato". Se disattivo, dopo la verifica tecnica puoi applicare subito.</small>
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <div class="settingsActions">
+              <span class="settingsActionHint">Le modifiche vengono applicate dopo il salvataggio.</span>
+              <button type="submit" class="primary">Salva impostazioni</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="logsPage" class="page" hidden>
+          <section class="panel logsPanel">
+            <div class="panelHeader">
+              <h2>Ultime modifiche</h2>
+              <div class="headerActions">
+                <button id="refreshLogs" type="button">Aggiorna</button>
+                <button id="clearLogs" class="ghostButton dangerGhost" type="button">Svuota log</button>
+              </div>
+            </div>
+            <div class="logToolbar" aria-label="Filtri log">
+              <div class="segmentedControl">
+                <button class="active" type="button" data-log-filter="all">Tutti</button>
+                <button type="button" data-log-filter="real">Reali</button>
+                <button type="button" data-log-filter="simulation">Simulazioni</button>
+                <button type="button" data-log-filter="error">Errori</button>
+              </div>
+              <input id="logSearch" placeholder="Cerca ordine, riga, prodotto o backup" aria-label="Cerca nei log" />
+            </div>
+            <div id="logsList" class="list"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="modalBackdrop" id="unlockDialog" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="unlockTitle">
+        <form id="unlockForm">
+          <h2 id="unlockTitle">Sblocco app</h2>
+          <label for="unlockPassword">Password locale</label>
+          <input id="unlockPassword" type="password" autocomplete="current-password" />
+          <div id="unlockError" class="fieldError" role="alert" hidden></div>
+          <div class="modalActions">
+            <button id="cancelUnlock" type="button">Annulla</button>
+            <button class="primary" type="submit">Sblocca</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
