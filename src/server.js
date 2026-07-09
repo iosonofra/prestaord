@@ -514,12 +514,18 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
 
   let hasMore = false;
   if (!exhausted && orders.length >= maxOrders && lastBatchCount > 0) {
-    const { page: nextPage } = await listOrdersPageAdaptive(client, filters, {
-      offset: orders.length,
-      limit: 1,
-    });
-    hasMore = nextPage.length > 0;
-    exhausted = !hasMore;
+    try {
+      const { page: nextPage } = await listOrdersPageAdaptive(client, filters, {
+        offset: orders.length,
+        limit: 1,
+      });
+      hasMore = nextPage.length > 0;
+      exhausted = !hasMore;
+    } catch (error) {
+      hasMore = true;
+      exhausted = false;
+      console.warn('Controllo finale cache ordini non riuscito, salvo comunque la cache:', errorMessage(error));
+    }
   }
 
   const cache = {
@@ -753,10 +759,12 @@ function startOrderCacheSyncJob(config, options = {}) {
       maxOrders: cache.maxOrders,
     });
   }).catch((error) => {
+    const message = errorMessage(error, 'Sincronizzazione cache non riuscita.');
+    console.error('Sincronizzazione cache non riuscita:', message);
     Object.assign(job, {
       status: 'error',
       phase: 'error',
-      error: errorMessage(error, 'Sincronizzazione cache non riuscita.'),
+      error: message,
       finishedAt: new Date().toISOString(),
     });
   }).finally(() => {
