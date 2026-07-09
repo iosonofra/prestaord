@@ -756,7 +756,7 @@ function startOrderCacheSyncJob(config, options = {}) {
     Object.assign(job, {
       status: 'error',
       phase: 'error',
-      error: error.message,
+      error: errorMessage(error, 'Sincronizzazione cache non riuscita.'),
       finishedAt: new Date().toISOString(),
     });
   }).finally(() => {
@@ -798,7 +798,7 @@ async function refreshOrderCacheHourlySchedule(config = null) {
   orderCacheHourlyNextRunAt = new Date(Date.now() + orderCacheHourlyIntervalMs).toISOString();
   orderCacheHourlyTimer = setInterval(() => {
     runHourlyOrderCacheSync().catch((error) => {
-      console.error('Sincronizzazione cache oraria non riuscita:', error);
+      console.error('Sincronizzazione cache oraria non riuscita:', errorMessage(error));
     });
   }, orderCacheHourlyIntervalMs);
   orderCacheHourlyTimer.unref?.();
@@ -806,6 +806,19 @@ async function refreshOrderCacheHourlySchedule(config = null) {
 
 function randomToken() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function errorMessage(error, fallback = 'Errore inatteso.') {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  if (error && typeof error === 'object') {
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
 }
 
 function requestToken(req) {
@@ -823,7 +836,7 @@ function asyncRoute(handler) {
     try {
       await handler(req, res, next);
     } catch (error) {
-      next(error);
+      next(error || new Error('Errore inatteso.'));
     }
   };
 }
@@ -1267,14 +1280,14 @@ app.post('/api/order-details/replace-product', asyncRoute(async (req, res) => {
         status: 'error',
         orderDetailId: String(orderDetailId),
         productId: String(productId),
-        error: error.message,
+        error: errorMessage(error),
       };
       await appendChangeLog(entry);
 
       errors.push({
         ok: false,
         orderDetailId: String(orderDetailId),
-        error: error.message,
+        error: errorMessage(error),
       });
     }
   }
@@ -1288,7 +1301,7 @@ app.post('/api/order-details/replace-product', asyncRoute(async (req, res) => {
 app.use((error, req, res, next) => {
   console.error(error);
   res.status(500).json({
-    error: error.message || 'Errore inatteso.',
+    error: errorMessage(error),
   });
 });
 

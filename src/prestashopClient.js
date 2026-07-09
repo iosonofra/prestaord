@@ -248,7 +248,7 @@ export class PrestashopClient {
         const order = await this.get('orders', trimmed);
         if (order?.id) found.push(order);
       } catch (error) {
-        if (!String(error.message).includes('404')) throw error;
+        if (!String(error?.message || '').includes('404')) throw error;
       }
     }
 

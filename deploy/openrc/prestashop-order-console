@@ -22,4 +22,6 @@ start_pre() {
   checkpath --directory --owner prestashop-console:prestashop-console --mode 0755 /opt/prestashop-order-console
   checkpath --directory --owner prestashop-console:prestashop-console --mode 0755 /opt/prestashop-order-console/backups
   checkpath --directory --owner prestashop-console:prestashop-console --mode 0755 /opt/prestashop-order-console/logs
+  checkpath --file --owner prestashop-console:prestashop-console --mode 0664 /var/log/prestashop-order-console.log
+  checkpath --file --owner prestashop-console:prestashop-console --mode 0664 /var/log/prestashop-order-console.err
 }
