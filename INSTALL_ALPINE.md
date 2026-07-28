@@ -51,7 +51,7 @@ su prestashop-console -s /bin/sh -c 'npm ci --omit=dev'
 
 ## Configurazione
 
-Puoi configurare tutto dall'interfaccia web in **Impostazioni**. In alternativa:
+Prepara la configurazione di rete prima del primo avvio:
 
 ```sh
 cp .env.example .env
@@ -60,17 +60,27 @@ chown prestashop-console:prestashop-console .env
 chmod 600 .env
 ```
 
+Per rendere la console raggiungibile direttamente sull'IP Alpine, imposta
+almeno:
+
+```env
+PORT=3000
+HOST=0.0.0.0
+APP_PASSWORD=INSERISCI_QUI_UNA_PASSWORD_LUNGA_E_UNIVOCA
+```
+
+URL e API key PrestaShop possono essere inseriti successivamente dalla pagina
+**Impostazioni**. Non lasciare `APP_PASSWORD` vuota: quando `HOST` non è locale,
+il server rifiuta l'avvio senza password.
+
 Avvio manuale:
 
 ```sh
-su prestashop-console -s /bin/sh -c 'PORT=3000 npm start'
+su prestashop-console -s /bin/sh -c 'npm start'
 ```
 
-Apri:
-
-```text
-http://IP_DEL_SERVER:3000
-```
+Apri `http://IP_DEL_SERVER:3000` e accedi con `APP_PASSWORD`. Per accessi da
+Internet usa un reverse proxy HTTPS.
 
 ## Servizio OpenRC
 
@@ -97,7 +107,7 @@ Prima salva i dati locali:
 ```sh
 cd /opt/prestashop-order-console
 mkdir -p /root/prestashop-console-backup
-cp -a app-config.json order-cache.json templates_export.csv backups logs /root/prestashop-console-backup/ 2>/dev/null || true
+cp -a .env app-config.json order-cache.json templates_export.csv product-canonical-groups.json backups logs /root/prestashop-console-backup/ 2>/dev/null || true
 ```
 
 Poi aggiorna da GitHub:
@@ -119,7 +129,7 @@ cd /opt
 mv prestashop-order-console prestashop-order-console.old
 mkdir prestashop-order-console
 unzip prestashop-order-product-swapper-alpine.zip -d prestashop-order-console
-cp -a /root/prestashop-console-backup/app-config.json /root/prestashop-console-backup/order-cache.json /root/prestashop-console-backup/templates_export.csv /root/prestashop-console-backup/backups /root/prestashop-console-backup/logs /opt/prestashop-order-console/ 2>/dev/null || true
+cp -a /root/prestashop-console-backup/.env /root/prestashop-console-backup/app-config.json /root/prestashop-console-backup/order-cache.json /root/prestashop-console-backup/templates_export.csv /root/prestashop-console-backup/product-canonical-groups.json /root/prestashop-console-backup/backups /root/prestashop-console-backup/logs /opt/prestashop-order-console/ 2>/dev/null || true
 cd /opt/prestashop-order-console
 npm ci --omit=dev
 chown -R prestashop-console:prestashop-console /opt/prestashop-order-console
@@ -133,8 +143,8 @@ Non caricare mai:
 - `.env`
 - `app-config.json`
 - `order-cache.json`
+- `product-canonical-groups.json`
 - `backups/`
 - `logs/`
 
 Valuta anche se pubblicare `templates_export.csv`: puo contenere dati reali del catalogo.
-

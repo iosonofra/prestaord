@@ -8,12 +8,26 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "check:dialog": "node scripts/check-dialog-accessibility.mjs",
+    "check:orders-empty": "node scripts/check-orders-empty-state.mjs",
+    "check:responsive": "node scripts/check-responsive.mjs",
+    "check:review-flow": "node scripts/check-review-flow.mjs",
+    "check:remaining-ui": "node scripts/check-remaining-ui.mjs",
+    "check:success-dialog": "node scripts/check-success-dialog.mjs",
+    "frontend:dev": "vite --config frontend/vite.config.js",
+    "frontend:build": "vite build --config frontend/vite.config.js"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^6.0.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "fast-xml-parser": "^4.5.1"
-  },
-  "devDependencies": {}
+    "fast-xml-parser": "^4.5.1",
+    "lucide-react": "^1.24.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4"
+  }
 }
