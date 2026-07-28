@@ -40,6 +40,9 @@ chown -R prestashop-console:prestashop-console /opt/prestashop-order-console
 su prestashop-console -s /bin/sh -c 'npm ci --omit=dev'
 ```
 
+`npm ci` esegue automaticamente anche la compilazione del frontend. Il
+pacchetto contiene comunque una build pronta in `dist/app`.
+
 Se usi GitHub invece dello zip:
 
 ```sh
@@ -135,6 +138,10 @@ npm ci --omit=dev
 chown -R prestashop-console:prestashop-console /opt/prestashop-order-console
 rc-service prestashop-order-console start
 ```
+
+Se il frontend non cambia dopo un aggiornamento, verifica che esista
+`frontend/vite.config.js`, esegui `npm run frontend:build`, riavvia OpenRC e
+ricarica il browser senza cache.
 
 ## File da non pubblicare su GitHub
 

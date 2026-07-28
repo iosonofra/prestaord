@@ -1,0 +1,57 @@
+/* Hallmark · tokens: Calendly-clean Operational Console · anchor hue: calendly-blue */
+:root {
+  --color-paper: oklch(98.6% 0.005 250);
+  --color-paper-2: oklch(96.6% 0.011 250);
+  --color-surface: oklch(100% 0 0);
+  --color-surface-2: oklch(98.2% 0.008 250);
+  --color-glass: oklch(100% 0 0 / 0.84);
+  --color-glass-strong: oklch(100% 0 0 / 0.94);
+  --color-ink: oklch(24% 0.071 253);
+  --color-ink-2: oklch(42% 0.058 253);
+  --color-muted: oklch(52% 0.055 253);
+  --color-rule: oklch(88.8% 0.023 252);
+  --color-rule-soft: oklch(93.7% 0.014 252);
+  --color-rail: oklch(100% 0 0);
+  --color-rail-2: oklch(98.2% 0.008 250);
+  --color-accent: oklch(56% 0.22 260);
+  --color-accent-ink: oklch(42% 0.19 260);
+  --color-accent-soft: oklch(94.5% 0.055 260);
+  --color-ok: oklch(47% 0.14 154);
+  --color-ok-soft: oklch(95% 0.04 154);
+  --color-warning: oklch(64% 0.14 82);
+  --color-warning-soft: oklch(96% 0.048 82);
+  --color-danger: oklch(50% 0.18 28);
+  --color-danger-soft: oklch(96% 0.045 28);
+  --color-focus: oklch(56% 0.22 260);
+
+  --font-display: "Aptos Display", Aptos, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: Aptos, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-short: 140ms;
+  --dur-med: 220ms;
+
+  --radius-input: 11px;
+  --radius-card: 14px;
+  --radius-panel: 18px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 2px oklch(24% 0.07 253 / 0.04), 0 14px 34px oklch(24% 0.07 253 / 0.07);
+  --shadow-glass: 0 18px 54px oklch(24% 0.07 253 / 0.1);
+}
