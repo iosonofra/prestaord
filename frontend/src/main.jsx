@@ -36,20 +36,13 @@ import { formatSelectedOrders, getOrderSelectionStatus } from './order-selection
 import { getOrderSyncPresentation } from './order-sync-presentation.js';
 import { filterEnabledOrderStates } from './enabled-order-states.js';
 import { getCanonicalSelectionState } from './canonical-selection.js';
+import {
+  getInitialOrderFilters,
+  initialFilters,
+  resetOrderSearch,
+} from './order-search-filters.js';
 
-export const initialFilters = {
-  q: '',
-  orderState: '',
-  dateFrom: '',
-  dateTo: '',
-  limit: '20',
-};
-
-export function resetOrderSearch(setFilters, onSearchOrders) {
-  const nextFilters = { ...initialFilters };
-  setFilters(nextFilters);
-  onSearchOrders(nextFilters);
-}
+export { getInitialOrderFilters, initialFilters, resetOrderSearch };
 
 const emptySettings = {
   baseUrl: '',
@@ -419,6 +412,7 @@ function App() {
   const [status, setStatusState] = useState({ text: 'Pronto', tone: 'neutral' });
   const [logsError, setLogsError] = useState('');
   const [successResult, setSuccessResult] = useState(null);
+  const orderSearchSequence = useRef(0);
 
   const selectedRowObjects = useMemo(() => {
     return [...selectedOrders.values()]
@@ -508,13 +502,8 @@ function App() {
       setLocked(false);
       const nextSettings = { ...emptySettings, ...(data.settings || {}) };
       setSettings(nextSettings);
-      setFilters({
-        q: '',
-        orderState: nextSettings.defaultOrderState || '',
-        dateFrom: nextSettings.orderDateFrom || '',
-        dateTo: nextSettings.orderDateTo || '',
-        limit: nextSettings.orderLimit || '20',
-      });
+      const nextFilters = getInitialOrderFilters(nextSettings);
+      setFilters(nextFilters);
       setStatus(data.configured ? 'Connessione configurata' : 'Configura la connessione', data.configured ? 'ok' : 'neutral');
       await Promise.allSettled([
         loadCacheStatus(activeToken),
@@ -522,13 +511,7 @@ function App() {
         loadTemplateStatus(activeToken),
         loadCanonicalGroups(activeToken),
       ]);
-      await searchOrders({
-        q: '',
-        orderState: nextSettings.defaultOrderState || '',
-        dateFrom: nextSettings.orderDateFrom || '',
-        dateTo: nextSettings.orderDateTo || '',
-        limit: nextSettings.orderLimit || '20',
-      }, activeToken);
+      await searchOrders(nextFilters, activeToken);
     } catch (err) {
       if (err.status === 401) {
         saveToken('');
@@ -562,7 +545,9 @@ function App() {
         setCacheStatus(nextStatus);
         setStatus(
           data.job?.status === 'done'
-            ? `Cache sincronizzata: ${nextStatus.count || 0} ordini`
+            ? data.job.incremental
+              ? `Ordini aggiornati: ${data.job.newCount || 0} nuovi · ${data.job.refreshedCount || 0} verificati`
+              : `Sincronizzazione completa: ${nextStatus.count || 0} ordini`
             : data.job?.error || 'Sincronizzazione ordini non riuscita',
           data.job?.status === 'done' ? 'ok' : 'error',
         );
@@ -760,25 +745,43 @@ function App() {
   async function syncCache() {
     return run('cache', async () => {
       const data = await request('/api/order-cache/sync', { method: 'POST', body: '{}' });
-      setStatus('Sincronizzazione ordini avviata', 'ok');
+      setStatus(
+        data.job?.incremental
+          ? 'Aggiornamento incrementale degli ordini avviato'
+          : 'Prima sincronizzazione completa avviata',
+        'ok',
+      );
       setCacheStatus((current) => ({ ...(current || {}), activeSync: data.job }));
     });
   }
 
   async function searchOrders(nextFilters = filters, sessionToken) {
+    const searchSequence = orderSearchSequence.current + 1;
+    orderSearchSequence.current = searchSequence;
     await run('orders', async () => {
-      setStatus(nextFilters.q ? 'Ricerca ordini...' : 'Carico ultimi ordini...');
+      setStatus(nextFilters.q ? 'Cerco in ordini sincronizzati e PrestaShop...' : 'Carico ultimi ordini...');
       const params = new URLSearchParams({
         q: nextFilters.q,
-        source: 'cache',
+        source: 'auto',
         limit: nextFilters.limit,
       });
       if (nextFilters.orderState) params.set('orderState', nextFilters.orderState);
       if (nextFilters.dateFrom) params.set('dateFrom', nextFilters.dateFrom);
       if (nextFilters.dateTo) params.set('dateTo', nextFilters.dateTo);
       const data = await request(`/api/orders?${params.toString()}`, { sessionToken });
+      if (searchSequence !== orderSearchSequence.current) return;
       setOrders(data.orders || []);
-      setStatus(data.orders?.length ? `${data.orders.length} ordini caricati` : 'Nessun ordine trovato', data.orders?.length ? 'ok' : 'neutral');
+      const sourceLabel = data.source === 'hybrid'
+        ? ' · cache + PrestaShop'
+        : data.source === 'live'
+          ? ' · PrestaShop'
+          : data.fallback
+            ? ' · cache (PrestaShop non raggiungibile)'
+            : '';
+      setStatus(
+        data.orders?.length ? `${data.orders.length} ordini caricati${sourceLabel}` : 'Nessun ordine trovato',
+        data.fallback ? 'warning' : data.orders?.length ? 'ok' : 'neutral',
+      );
     });
   }
 
@@ -920,7 +923,11 @@ function App() {
         data,
         requestedRows: [...selectedRowObjects],
         product: selectedProduct,
+        resetApplied: !data.errors?.length && Boolean(data.updated?.length),
       });
+      if (!data.errors?.length && data.updated?.length) {
+        await resetCompletedWorkflow();
+      }
       setStatus(data.errors?.length ? 'Operazione completata con errori' : 'Sostituzione completata', data.errors?.length ? 'error' : 'ok');
       await loadLogs();
     });
@@ -934,6 +941,34 @@ function App() {
     setProducts([]);
     setTemplates([]);
     invalidateSafety();
+  }
+
+  async function resetCompletedWorkflow({ reloadOrders = true } = {}) {
+    clearOperation();
+    setPage('orders');
+    const nextFilters = getInitialOrderFilters(settings);
+    setFilters(nextFilters);
+    setOrders([]);
+    if (reloadOrders) {
+      await searchOrders(nextFilters).catch(() => {});
+    }
+  }
+
+  async function startNewOperation() {
+    const alreadyReset = Boolean(successResult?.resetApplied);
+    setSuccessResult(null);
+    if (alreadyReset) {
+      setPage('orders');
+      return;
+    }
+    await resetCompletedWorkflow();
+  }
+
+  async function viewLogsAfterOperation() {
+    const alreadyReset = Boolean(successResult?.resetApplied);
+    setSuccessResult(null);
+    if (!alreadyReset) await resetCompletedWorkflow();
+    setPage('logs');
   }
 
   async function loadLogs(overrides = {}) {
@@ -1045,8 +1080,8 @@ function App() {
         </div>
         <SuccessDialog
           result={successResult}
-          onViewLogs={() => { setSuccessResult(null); setPage('logs'); clearOperation(); }}
-          onNewOperation={() => { setSuccessResult(null); clearOperation(); }}
+          onViewLogs={viewLogsAfterOperation}
+          onNewOperation={startNewOperation}
         />
       </>
     );
@@ -1213,6 +1248,14 @@ function App() {
             onLoadStates={() => run('states', loadOrderStates)}
             onSyncCache={syncCache}
             onImportTemplates={importProductTemplates}
+            onLoadIntegrationTokens={() => request('/api/integration-tokens')}
+            onCreateIntegrationToken={(label) => request('/api/integration-tokens', {
+              method: 'POST',
+              body: JSON.stringify({ label }),
+            })}
+            onDeleteIntegrationToken={(id) => request(`/api/integration-tokens/${encodeURIComponent(id)}`, {
+              method: 'DELETE',
+            })}
           />
         ) : null}
 
@@ -2067,16 +2110,74 @@ export function SettingsPage({
   onLoadStates,
   onSyncCache,
   onImportTemplates = async () => null,
+  onLoadIntegrationTokens = async () => ({ tokens: [] }),
+  onCreateIntegrationToken = async () => null,
+  onDeleteIntegrationToken = async () => null,
 }) {
   const selectedStateSet = new Set((settings.orderStates || []).map(String));
   const [replaceApiKey, setReplaceApiKey] = useState(!settings.apiKeyConfigured);
   const [templateFile, setTemplateFile] = useState(null);
   const [templateImportFeedback, setTemplateImportFeedback] = useState({ tone: '', text: '' });
+  const [integrationTokens, setIntegrationTokens] = useState([]);
+  const [integrationLabel, setIntegrationLabel] = useState('Browser PrestaShop');
+  const [newIntegrationToken, setNewIntegrationToken] = useState('');
+  const [integrationFeedback, setIntegrationFeedback] = useState({ tone: '', text: '' });
+  const [integrationBusy, setIntegrationBusy] = useState('');
+  const [activeSettingsSection, setActiveSettingsSection] = useState('connection');
+  const [settingsFormError, setSettingsFormError] = useState('');
   const templateFileRef = useRef(null);
+  const loadIntegrationTokensRef = useRef(onLoadIntegrationTokens);
+  loadIntegrationTokensRef.current = onLoadIntegrationTokens;
 
   useEffect(() => {
     setReplaceApiKey(!settings.apiKeyConfigured);
   }, [settings.apiKeyConfigured, settings.apiKeyHint]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadIntegrationTokensRef.current()
+      .then((result) => {
+        if (!cancelled) setIntegrationTokens(result?.tokens || []);
+      })
+      .catch((error) => {
+        if (!cancelled) setIntegrationFeedback({ tone: 'error', text: error.message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function createIntegrationToken() {
+    setIntegrationBusy('create');
+    setIntegrationFeedback({ tone: '', text: '' });
+    try {
+      const result = await onCreateIntegrationToken(integrationLabel);
+      setIntegrationTokens((current) => [...current, result.integration]);
+      setNewIntegrationToken(result.token);
+      setIntegrationFeedback({
+        tone: 'ok',
+        text: 'Token creato. Copialo ora: per sicurezza non sarà mostrato di nuovo.',
+      });
+    } catch (error) {
+      setIntegrationFeedback({ tone: 'error', text: error.message });
+    } finally {
+      setIntegrationBusy('');
+    }
+  }
+
+  async function deleteIntegrationToken(id) {
+    setIntegrationBusy(id);
+    try {
+      await onDeleteIntegrationToken(id);
+      setIntegrationTokens((current) => current.filter((item) => item.id !== id));
+      setNewIntegrationToken('');
+      setIntegrationFeedback({ tone: 'ok', text: 'Accesso revocato immediatamente.' });
+    } catch (error) {
+      setIntegrationFeedback({ tone: 'error', text: error.message });
+    } finally {
+      setIntegrationBusy('');
+    }
+  }
 
   async function handleTemplateImport() {
     if (!templateFile) {
@@ -2097,152 +2198,365 @@ export function SettingsPage({
     }
   }
 
+  const settingsNavigation = [
+    { id: 'connection', label: 'Connessione', icon: Database },
+    { id: 'orders', label: 'Ordini sincronizzati', icon: ShoppingCart },
+    { id: 'workflow', label: 'Procedura di modifica', icon: ClipboardCheck },
+    { id: 'catalog', label: 'Catalogo rapido', icon: PackageSearch },
+    { id: 'security', label: 'Sicurezza', icon: ShieldCheck },
+    { id: 'browser', label: 'Browser e userscript', icon: KeyRound },
+  ];
+
+  function activateSettingsSection(sectionId, { scroll = false } = {}) {
+    setActiveSettingsSection(sectionId);
+    setSettingsFormError('');
+    if (scroll && globalThis.matchMedia?.('(max-width: 1280px)').matches) {
+      requestAnimationFrame(() => {
+        document.getElementById(`settings-${sectionId}`)?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      });
+    }
+  }
+
+  function handleSettingsTabKeyDown(event, currentIndex) {
+    const lastIndex = settingsNavigation.length - 1;
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIndex = currentIndex === lastIndex ? 0 : currentIndex + 1;
+    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') nextIndex = currentIndex === 0 ? lastIndex : currentIndex - 1;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = lastIndex;
+    else return;
+
+    event.preventDefault();
+    const nextSection = settingsNavigation[nextIndex];
+    activateSettingsSection(nextSection.id);
+    document.getElementById(`settings-tab-${nextSection.id}`)?.focus();
+  }
+
+  function handleSettingsSubmit(event) {
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    if (!settings.apiKeyConfigured && !String(formData.get('apiKey') || '').trim()) {
+      event.preventDefault();
+      setActiveSettingsSection('connection');
+      setSettingsFormError('Inserisci la API key PrestaShop prima di salvare.');
+      requestAnimationFrame(() => form.querySelector('[name="apiKey"]')?.focus());
+      return;
+    }
+    setSettingsFormError('');
+    onSave(event);
+  }
+
   return (
-    <form className="settingsPage" onSubmit={onSave}>
-      <section className="panel">
-        <PanelHeader title="Connessione PrestaShop" subtitle="Dati Webservice usati per ordini, prodotti e stati." />
-        <div className="formGrid">
-          <Field label="URL negozio"><input name="baseUrl" defaultValue={settings.baseUrl} placeholder="https://www.tuo-negozio.it" /></Field>
-          <div className="field">
-            <span>API key</span>
-            {settings.apiKeyConfigured && !replaceApiKey ? (
-              <div className="alert alert-ok">
-                <ShieldCheck className="icon" />
-                <span>Configurata {settings.apiKeyHint}</span>
-                <IconButton type="button" variant="ghost" onClick={() => setReplaceApiKey(true)}>
-                  Sostituisci API key
+    <form className="settingsPage" onSubmit={handleSettingsSubmit} noValidate>
+      <header className="settingsHero panel">
+        <div className="settingsHeroCopy">
+          <span className="eyebrow">Configurazione</span>
+          <h2>Panoramica configurazione</h2>
+          <p>Connessioni, ordini e sicurezza organizzati per area. Le modifiche diventano attive solo dopo il salvataggio.</p>
+        </div>
+        <div className="settingsHealth" aria-label="Riepilogo configurazione">
+          <span className={cx('settingsHealthItem', settings.apiKeyConfigured && settings.baseUrl && 'ready')}>
+            <ShieldCheck className="icon" aria-hidden="true" />
+            <span><small>PrestaShop</small><strong>{settings.apiKeyConfigured && settings.baseUrl ? 'Connesso' : 'Da configurare'}</strong></span>
+          </span>
+          <span className={cx('settingsHealthItem', (settings.orderStates || []).length && 'ready')}>
+            <ShoppingCart className="icon" aria-hidden="true" />
+            <span><small>Stati attivi</small><strong>{(settings.orderStates || []).length}</strong></span>
+          </span>
+          <span className={cx('settingsHealthItem', templateStatus?.configured && 'ready')}>
+            <FileSpreadsheet className="icon" aria-hidden="true" />
+            <span><small>Catalogo rapido</small><strong>{templateStatus?.configured ? `${templateStatus.count} prodotti` : 'Da importare'}</strong></span>
+          </span>
+        </div>
+      </header>
+
+      <div className="settingsLayout">
+        <nav className="settingsIndex panel" aria-label="Sezioni impostazioni" role="tablist" aria-orientation="vertical">
+          <span className="settingsIndexLabel" role="presentation">Scegli una sezione</span>
+          {settingsNavigation.map((section, index) => {
+            const SectionIcon = section.icon;
+            const active = activeSettingsSection === section.id;
+            return (
+              <button
+                key={section.id}
+                id={`settings-tab-${section.id}`}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                aria-controls={`settings-${section.id}`}
+                tabIndex={active ? 0 : -1}
+                className={cx(active && 'active')}
+                onClick={() => activateSettingsSection(section.id, { scroll: true })}
+                onKeyDown={(event) => handleSettingsTabKeyDown(event, index)}
+              >
+                <SectionIcon className="icon" aria-hidden="true" />
+                <span>{section.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="settingsContent">
+          <section className="panel settingsSection" id="settings-connection" role="tabpanel" aria-labelledby="settings-tab-connection" hidden={activeSettingsSection !== 'connection'}>
+            <header className="settingsSectionHeader">
+              <span className="settingsSectionIcon"><Database aria-hidden="true" /></span>
+              <div>
+                <span className="eyebrow">01 · Collegamento</span>
+                <h2>Connessione PrestaShop</h2>
+                <p>Credenziali Webservice usate per ordini, prodotti e stati.</p>
+              </div>
+            </header>
+            <div className="formGrid">
+              <Field label="URL negozio" hint="Indirizzo principale del negozio, senza /api finale.">
+                <input name="baseUrl" defaultValue={settings.baseUrl} placeholder="https://www.tuo-negozio.it" />
+              </Field>
+              <div className="field">
+                <span>API key Webservice</span>
+                {settings.apiKeyConfigured && !replaceApiKey ? (
+                  <div className="alert alert-ok settingsCredential">
+                    <ShieldCheck className="icon" />
+                    <span>Configurata {settings.apiKeyHint}</span>
+                    <IconButton type="button" variant="ghost" onClick={() => setReplaceApiKey(true)}>
+                      Sostituisci
+                    </IconButton>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      name="apiKey"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={settings.apiKeyConfigured ? 'Inserisci la nuova API key' : 'API key Webservice PrestaShop'}
+                      aria-required={!settings.apiKeyConfigured}
+                      onChange={() => setSettingsFormError('')}
+                    />
+                    {settings.apiKeyConfigured ? (
+                      <IconButton type="button" variant="ghost" onClick={() => setReplaceApiKey(false)}>
+                        Mantieni quella attuale
+                      </IconButton>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            </div>
+            {settingsFormError ? <div className="alert alert-error" role="alert">{settingsFormError}</div> : null}
+          </section>
+
+          <section className="panel settingsSection" id="settings-orders" role="tabpanel" aria-labelledby="settings-tab-orders" hidden={activeSettingsSection !== 'orders'}>
+            <header className="settingsSectionHeader">
+              <span className="settingsSectionIcon"><ShoppingCart aria-hidden="true" /></span>
+              <div>
+                <span className="eyebrow">02 · Ordini</span>
+                <h2>Ricerca e sincronizzazione</h2>
+                <p>Definisci quali ordini mantenere disponibili e con quale frequenza aggiornarli.</p>
+              </div>
+              <IconButton type="button" icon={RefreshCw} busy={busy === 'states'} onClick={onLoadStates}>Aggiorna stati</IconButton>
+            </header>
+            <div className="settingsSubsection">
+              <div className="settingsSubsectionTitle">
+                <h3>Stati inclusi</h3>
+                <p>Solo gli ordini negli stati selezionati saranno mostrati e sincronizzati.</p>
+              </div>
+              <div className="choiceGrid">
+                {orderStates.map((state) => (
+                  <label key={state.id} className="checkCard">
+                    <input type="checkbox" name="orderStates" value={state.id} defaultChecked={selectedStateSet.has(String(state.id))} />
+                    {state.name}
+                  </label>
+                ))}
+                {!orderStates.length ? <p className="empty">Carica gli stati da PrestaShop.</p> : null}
+              </div>
+            </div>
+            <div className="settingsSubsection">
+              <div className="settingsSubsectionTitle">
+                <h3>Intervallo e capacità</h3>
+                <p>Controlla il filtro iniziale e la dimensione dell’archivio sincronizzato.</p>
+              </div>
+              <div className="formGrid settingsOrderGrid">
+                <Field label="Stato predefinito"><select name="defaultOrderState" defaultValue={settings.defaultOrderState}>{orderStates.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}</select></Field>
+                <Field label="Risultati per ricerca"><select name="orderLimit" defaultValue={settings.orderLimit}>{['20', '50', '100', '250', '500', '1000'].map((v) => <option key={v} value={v}>Primi {v}</option>)}</select></Field>
+                <Field label="Ordini dal"><input type="date" name="orderDateFrom" defaultValue={settings.orderDateFrom} /></Field>
+                <Field label="Ordini fino al"><input type="date" name="orderDateTo" defaultValue={settings.orderDateTo} /></Field>
+                <Field label="Ordini per blocco"><select name="cacheBatchSize" defaultValue={settings.cacheBatchSize}>{['50', '60', '80', '100'].map((v) => <option key={v} value={v}>{v}</option>)}</select></Field>
+                <Field label="Massimo ordini conservati"><select name="cacheMaxOrders" defaultValue={settings.cacheMaxOrders}>{['100', '250', '500', '1000'].map((v) => <option key={v} value={v}>{v}</option>)}</select></Field>
+              </div>
+            </div>
+            <div className="toggleGrid settingsToggleGrid">
+              <label className="settingsToggle">
+                <input type="checkbox" name="cacheAutoSync" defaultChecked={settings.cacheAutoSync} />
+                <span><strong>Sincronizza al salvataggio</strong><small>Aggiorna gli ordini subito dopo aver salvato queste impostazioni.</small></span>
+              </label>
+              <label className="settingsToggle">
+                <input type="checkbox" name="cacheHourlySync" defaultChecked={settings.cacheHourlySync} />
+                <span><strong>Aggiornamento ogni ora</strong><small>Mantiene automaticamente aggiornati gli ordini sincronizzati.</small></span>
+              </label>
+            </div>
+            <div className="settingsInlineAction">
+              <div><strong>Sincronizzazione manuale</strong><small>Avvia ora un aggiornamento senza salvare altre modifiche.</small></div>
+              <IconButton type="button" icon={Database} busy={busy === 'cache'} onClick={onSyncCache}>Sincronizza ora</IconButton>
+            </div>
+          </section>
+
+          <section className="panel settingsSection" id="settings-workflow" role="tabpanel" aria-labelledby="settings-tab-workflow" hidden={activeSettingsSection !== 'workflow'}>
+            <header className="settingsSectionHeader">
+              <span className="settingsSectionIcon"><ClipboardCheck aria-hidden="true" /></span>
+              <div>
+                <span className="eyebrow">03 · Controlli</span>
+                <h2>Procedura di modifica</h2>
+                <p>Scegli quali controlli richiedere prima di scrivere realmente su PrestaShop.</p>
+              </div>
+            </header>
+            <div className="toggleGrid settingsToggleGrid">
+              <label className="settingsToggle">
+                <input type="checkbox" name="requirePreflightCheck" defaultChecked={settings.requirePreflightCheck} />
+                <span><strong>Verifica senza modificare</strong><small>Controlla prima che la sostituzione sia eseguibile. Se disattivata, dopo l’anteprima puoi procedere direttamente.</small></span>
+              </label>
+              <label className="settingsToggle">
+                <input type="checkbox" name="requireConfirmCheck" defaultChecked={settings.requireConfirmCheck} />
+                <span><strong>Conferma manuale finale</strong><small>Richiede una conferma esplicita prima dell’applicazione reale.</small></span>
+              </label>
+            </div>
+          </section>
+
+          <section className="panel settingsSection templateSettings" id="settings-catalog" role="tabpanel" aria-labelledby="settings-tab-catalog" hidden={activeSettingsSection !== 'catalog'}>
+            <header className="settingsSectionHeader">
+              <span className="settingsSectionIcon"><PackageSearch aria-hidden="true" /></span>
+              <div>
+                <span className="eyebrow">04 · Prodotti</span>
+                <h2>Catalogo risultati rapidi</h2>
+                <p>Gestisci i suggerimenti mostrati durante la ricerca del prodotto sostitutivo.</p>
+              </div>
+            </header>
+            <div className="templateStatusCard" aria-live="polite">
+              <FileSpreadsheet className="titleIcon" aria-hidden="true" />
+              <div>
+                <span>File attivo</span>
+                <strong>{templateStatus?.fileName || 'templates_export.csv'}</strong>
+                <small>
+                  {templateStatus?.configured
+                    ? `${templateStatus.count} prodotti · aggiornato ${shortDate(templateStatus.updatedAt)}`
+                    : 'Nessun file importato. Puoi aggiungere un CSV qui sotto.'}
+                </small>
+              </div>
+              <Badge tone={templateStatus?.configured ? 'ok' : 'warning'}>
+                {templateStatus?.configured ? 'Attivo' : 'Da configurare'}
+              </Badge>
+            </div>
+            <div className="templateImportGrid">
+              <Field label="File CSV" hint="Colonne richieste: ID e Nome, Name oppure SKU. Dimensione massima 5 MB.">
+                <input
+                  ref={templateFileRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={(event) => {
+                    setTemplateFile(event.target.files?.[0] || null);
+                    setTemplateImportFeedback({ tone: '', text: '' });
+                  }}
+                  aria-describedby="templateCsvHint"
+                />
+              </Field>
+              <Field label="Suggerimenti mostrati" hint="Numero massimo visualizzato mentre digiti.">
+                <select name="productTemplateLimit" defaultValue={settings.productTemplateLimit || '8'}>
+                  {['5', '8', '10', '15', '20'].map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </Field>
+              <IconButton type="button" icon={Upload} busy={busy === 'templates-import'} onClick={handleTemplateImport} variant="primary">
+                Importa CSV
+              </IconButton>
+            </div>
+            <p id="templateCsvHint" className="templateFileNote">
+              L’importazione aggiorna <strong>templates_export.csv</strong>. La versione precedente viene conservata nei backup.
+            </p>
+            {templateImportFeedback.text ? (
+              <div className={cx('alert', templateImportFeedback.tone === 'error' ? 'alert-error' : 'alert-ok')} role={templateImportFeedback.tone === 'error' ? 'alert' : 'status'}>
+                {templateImportFeedback.text}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="panel settingsSection" id="settings-security" role="tabpanel" aria-labelledby="settings-tab-security" hidden={activeSettingsSection !== 'security'}>
+            <header className="settingsSectionHeader">
+              <span className="settingsSectionIcon"><ShieldCheck aria-hidden="true" /></span>
+              <div>
+                <span className="eyebrow">05 · Accesso</span>
+                <h2>Sicurezza locale</h2>
+                <p>Protegge la console sul computer o sulla rete dove viene eseguita.</p>
+              </div>
+              <Badge tone={settings.appPasswordEnabled ? 'ok' : 'warning'}>{settings.appPasswordEnabled ? 'Protetta' : 'Senza password'}</Badge>
+            </header>
+            <Field
+              label={settings.appPasswordEnabled ? 'Nuova password locale' : 'Password locale app'}
+              hint={settings.appPasswordEnabled ? 'Lascia vuoto per mantenere la password attuale.' : 'Consigliata; obbligatoria se la console viene esposta in rete.'}
+            >
+              <input type="password" name="appPassword" autoComplete="new-password" placeholder={settings.appPasswordEnabled ? 'Lascia vuoto per non cambiarla' : 'Imposta una password'} />
+            </Field>
+            {settings.appPasswordEnabled ? (
+              <label className="checkLine settingsDangerChoice">
+                <input type="checkbox" name="removeAppPassword" />
+                Rimuovi la password locale al salvataggio
+              </label>
+            ) : null}
+          </section>
+
+          <section className="panel settingsSection integrationSettings" id="settings-browser" role="tabpanel" aria-labelledby="settings-tab-browser" hidden={activeSettingsSection !== 'browser'}>
+            <header className="settingsSectionHeader">
+              <span className="settingsSectionIcon"><KeyRound aria-hidden="true" /></span>
+              <div>
+                <span className="eyebrow">06 · Integrazioni</span>
+                <h2>Browser e userscript</h2>
+                <p>Autorizza i client senza condividere password o API key PrestaShop.</p>
+              </div>
+              <Badge tone={integrationTokens.length ? 'ok' : 'neutral'}>{integrationTokens.length} autorizzati</Badge>
+            </header>
+            <div className="integrationDownloads">
+              <a className="btn btn-ghost" href="/integrations/chrome.zip" download>Scarica Chrome</a>
+              <a className="btn btn-ghost" href="/integrations/firefox.zip" download>Scarica Firefox</a>
+              <a className="btn btn-ghost" href="/integrations/prestashop-order-console.user.js">Installa userscript</a>
+            </div>
+            <div className="settingsSubsection">
+              <div className="settingsSubsectionTitle">
+                <h3>Nuova autorizzazione</h3>
+                <p>Crea un token separato per ogni browser o postazione.</p>
+              </div>
+              <div className="integrationCreate">
+                <Field label="Nome accesso" hint="Esempio: Chrome ufficio oppure Firefox magazzino.">
+                  <input value={integrationLabel} maxLength="80" onChange={(event) => setIntegrationLabel(event.target.value)} />
+                </Field>
+                <IconButton type="button" icon={KeyRound} variant="primary" busy={integrationBusy === 'create'} onClick={createIntegrationToken}>
+                  Crea token
                 </IconButton>
               </div>
-            ) : (
-              <>
-                <input
-                  name="apiKey"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={settings.apiKeyConfigured ? 'Inserisci la nuova API key' : 'API key Webservice PrestaShop'}
-                  required={!settings.apiKeyConfigured}
-                />
-                {settings.apiKeyConfigured ? (
-                  <IconButton type="button" variant="ghost" onClick={() => setReplaceApiKey(false)}>
-                    Mantieni quella attuale
-                  </IconButton>
-                ) : null}
-              </>
-            )}
-          </div>
+            </div>
+            {newIntegrationToken ? (
+              <div className="integrationSecret" role="status">
+                <div><span>Token da copiare</span><code>{newIntegrationToken}</code></div>
+                <IconButton type="button" icon={ClipboardCheck} onClick={async () => {
+                  await navigator.clipboard.writeText(newIntegrationToken);
+                  setIntegrationFeedback({ tone: 'ok', text: 'Token copiato negli appunti.' });
+                }}>Copia</IconButton>
+              </div>
+            ) : null}
+            <div className="integrationList">
+              {integrationTokens.map((item) => (
+                <div className="integrationRow" key={item.id}>
+                  <KeyRound className="icon" aria-hidden="true" />
+                  <div><strong>{item.label}</strong><small>Creato {shortDate(item.createdAt)}</small></div>
+                  <IconButton type="button" icon={Trash2} variant="danger" busy={integrationBusy === item.id} onClick={() => deleteIntegrationToken(item.id)}>Revoca</IconButton>
+                </div>
+              ))}
+              {!integrationTokens.length ? <p className="empty">Nessun browser autorizzato.</p> : null}
+            </div>
+            {integrationFeedback.text ? (
+              <div className={cx('alert', integrationFeedback.tone === 'error' ? 'alert-error' : 'alert-ok')}>{integrationFeedback.text}</div>
+            ) : null}
+          </section>
         </div>
-      </section>
-      <section className="panel templateSettings">
-        <PanelHeader
-          title="Risultati rapidi prodotti"
-          subtitle="Gestisci i suggerimenti mostrati durante la ricerca del prodotto sostitutivo."
-        />
-        <div className="templateStatusCard" aria-live="polite">
-          <FileSpreadsheet className="titleIcon" aria-hidden="true" />
-          <div>
-            <span>File attivo</span>
-            <strong>{templateStatus?.fileName || 'templates_export.csv'}</strong>
-            <small>
-              {templateStatus?.configured
-                ? `${templateStatus.count} prodotti · aggiornato ${shortDate(templateStatus.updatedAt)}`
-                : 'Nessun file importato. Puoi aggiungere un CSV qui sotto.'}
-            </small>
-          </div>
-          <Badge tone={templateStatus?.configured ? 'ok' : 'warning'}>
-            {templateStatus?.configured ? 'Attivo' : 'Da configurare'}
-          </Badge>
-        </div>
-        <div className="templateImportGrid">
-          <Field label="File CSV" hint="Colonne richieste: ID e Nome, Name oppure SKU. Dimensione massima 5 MB.">
-            <input
-              ref={templateFileRef}
-              type="file"
-              accept=".csv,text/csv"
-              onChange={(event) => {
-                setTemplateFile(event.target.files?.[0] || null);
-                setTemplateImportFeedback({ tone: '', text: '' });
-              }}
-              aria-describedby="templateCsvHint"
-            />
-          </Field>
-          <Field label="Suggerimenti mostrati" hint="Numero massimo di risultati rapidi visualizzati mentre digiti.">
-            <select name="productTemplateLimit" defaultValue={settings.productTemplateLimit || '8'}>
-              {['5', '8', '10', '15', '20'].map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-          </Field>
-          <IconButton
-            type="button"
-            icon={Upload}
-            busy={busy === 'templates-import'}
-            onClick={handleTemplateImport}
-            variant="primary"
-          >
-            Importa CSV
-          </IconButton>
-        </div>
-        <p id="templateCsvHint" className="templateFileNote">
-          L’importazione aggiorna <strong>templates_export.csv</strong>. Se esiste già, la versione precedente viene copiata nei backup.
-        </p>
-        {templateImportFeedback.text ? (
-          <div
-            className={cx('alert', templateImportFeedback.tone === 'error' ? 'alert-error' : 'alert-ok')}
-            role={templateImportFeedback.tone === 'error' ? 'alert' : 'status'}
-          >
-            {templateImportFeedback.text}
-          </div>
-        ) : null}
-      </section>
-      <section className="panel">
-        <PanelHeader title="Stati e sincronizzazione" subtitle="Configura quali ordini importare da PrestaShop e mantenere disponibili." action={<IconButton type="button" icon={RefreshCw} busy={busy === 'states'} onClick={onLoadStates}>Carica stati</IconButton>} />
-        <div className="choiceGrid">
-          {orderStates.map((state) => (
-            <label key={state.id} className="checkCard">
-              <input type="checkbox" name="orderStates" value={state.id} defaultChecked={selectedStateSet.has(String(state.id))} />
-              {state.name}
-            </label>
-          ))}
-          {!orderStates.length ? <p className="empty">Carica gli stati da PrestaShop.</p> : null}
-        </div>
-        <div className="formGrid">
-          <Field label="Stato predefinito"><select name="defaultOrderState" defaultValue={settings.defaultOrderState}>{orderStates.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}</select></Field>
-          <Field label="Limite risultati"><select name="orderLimit" defaultValue={settings.orderLimit}>{['20', '50', '100', '250', '500', '1000'].map((v) => <option key={v} value={v}>Primi {v}</option>)}</select></Field>
-          <Field label="Data da"><input type="date" name="orderDateFrom" defaultValue={settings.orderDateFrom} /></Field>
-          <Field label="Data a"><input type="date" name="orderDateTo" defaultValue={settings.orderDateTo} /></Field>
-          <Field label="Ordini per blocco"><select name="cacheBatchSize" defaultValue={settings.cacheBatchSize}>{['50', '60', '80', '100'].map((v) => <option key={v} value={v}>{v}</option>)}</select></Field>
-          <Field label="Massimo ordini sincronizzati"><select name="cacheMaxOrders" defaultValue={settings.cacheMaxOrders}>{['100', '250', '500', '1000'].map((v) => <option key={v} value={v}>{v}</option>)}</select></Field>
-        </div>
-        <div className="toggleGrid">
-          <label><input type="checkbox" name="cacheAutoSync" defaultChecked={settings.cacheAutoSync} /> Sincronizza dopo il salvataggio</label>
-          <label><input type="checkbox" name="cacheHourlySync" defaultChecked={settings.cacheHourlySync} /> Aggiorna gli ordini ogni ora</label>
-          <label>
-            <input type="checkbox" name="requirePreflightCheck" defaultChecked={settings.requirePreflightCheck} />
-            Richiedi verifica senza modificare prima della scrittura reale
-          </label>
-          <label><input type="checkbox" name="requireConfirmCheck" defaultChecked={settings.requireConfirmCheck} /> Conferma manuale prima della modifica reale</label>
-        </div>
-        <IconButton type="button" icon={Database} busy={busy === 'cache'} onClick={onSyncCache}>Sincronizza ordini ora</IconButton>
-      </section>
-      <section className="panel">
-        <PanelHeader title="Sicurezza locale" subtitle="Protegge l'app sul computer dove viene eseguita." />
-        <Field
-          label={settings.appPasswordEnabled ? 'Nuova password locale' : 'Password locale app'}
-          hint={settings.appPasswordEnabled ? 'Lascia vuoto per mantenere la password attuale.' : 'Consigliata; obbligatoria se la console viene esposta in rete.'}
-        >
-          <input
-            type="password"
-            name="appPassword"
-            autoComplete="new-password"
-            placeholder={settings.appPasswordEnabled ? 'Lascia vuoto per non cambiarla' : 'Imposta una password'}
-          />
-        </Field>
-        {settings.appPasswordEnabled ? (
-          <label className="checkLine">
-            <input type="checkbox" name="removeAppPassword" />
-            Rimuovi la password locale al salvataggio
-          </label>
-        ) : null}
-      </section>
+      </div>
       <div className="stickyActions">
+        <span>Salva per applicare le modifiche a tutte le aree.</span>
         <IconButton type="submit" icon={Check} busy={busy === 'settings'} variant="primary">Salva impostazioni</IconButton>
       </div>
     </form>

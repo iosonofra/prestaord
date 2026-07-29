@@ -22,7 +22,11 @@ export function getOrderSyncPresentation(cacheStatus = {}) {
       processedCount: 0,
       importTotal: 0,
       title: count ? `${count} ordini disponibili` : 'Nessun ordine sincronizzato',
-      detail: count ? 'Pronti per la ricerca e la selezione.' : 'Avvia la prima sincronizzazione.',
+      detail: count
+        ? cacheStatus.syncMode === 'incremental'
+          ? `${Number(cacheStatus.newCount || 0)} nuovi · ${Number(cacheStatus.refreshedCount || 0)} verificati nell’ultimo aggiornamento.`
+          : 'Sincronizzazione completa disponibile per ricerca e selezione.'
+        : 'Avvia la prima sincronizzazione.',
       badge: count ? `${count} sincronizzati` : 'Ordini da sincronizzare',
       phaseLabel: '',
     };

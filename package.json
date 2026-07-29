@@ -16,7 +16,9 @@
     "check:review-flow": "node scripts/check-review-flow.mjs",
     "check:remaining-ui": "node scripts/check-remaining-ui.mjs",
     "check:success-dialog": "node scripts/check-success-dialog.mjs",
-    "postinstall": "npm run frontend:build",
+    "integrations:build": "node scripts/build-integrations.mjs",
+    "alpine:package": "npm run frontend:build && npm run integrations:build && node scripts/build-alpine-package.mjs",
+    "postinstall": "npm run frontend:build && npm run integrations:build",
     "frontend:dev": "vite --config frontend/vite.config.js",
     "frontend:build": "vite build --config frontend/vite.config.js"
   },

@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,7 @@ const backupsPath = path.join(dataRoot, 'backups');
 const logsPath = path.join(dataRoot, 'logs');
 const changesLogPath = path.join(logsPath, 'changes.jsonl');
 const builtFrontendPath = path.join(projectRoot, 'dist', 'app');
+const builtIntegrationsPath = path.join(projectRoot, 'dist', 'integrations');
 const legacyPublicPath = path.join(projectRoot, 'public');
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -46,8 +47,31 @@ let productTemplatesCache = {
   mtimeMs: 0,
   products: [],
 };
+let orderCacheWriteQueue = Promise.resolve();
 
 app.use(express.json({ limit: '6mb' }));
+app.use(['/api/health', '/api/integration'], (req, res, next) => {
+  const origin = String(req.headers.origin || '');
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+app.use('/integrations', express.static(builtIntegrationsPath, {
+  etag: false,
+  lastModified: false,
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+  },
+}));
 app.use(express.static(builtFrontendPath));
 app.use(express.static(legacyPublicPath));
 
@@ -676,6 +700,8 @@ async function readOrderCache() {
       totalFound: cache.totalFound ?? null,
       hasMore: Boolean(cache.hasMore),
       syncMode: cache.syncMode || '',
+      newCount: Number(cache.newCount || 0),
+      refreshedCount: Number(cache.refreshedCount || 0),
       orders: Array.isArray(cache.orders) ? cache.orders.map(sanitizeOrderCacheEntry) : [],
     };
   } catch (error) {
@@ -689,7 +715,19 @@ async function writeOrderCache(cache) {
     ...cache,
     orders: Array.isArray(cache.orders) ? cache.orders.map(sanitizeOrderCacheEntry) : [],
   };
-  await fs.writeFile(orderCachePath, `${JSON.stringify(cleanCache, null, 2)}\n`, 'utf8');
+  const operation = orderCacheWriteQueue.catch(() => {}).then(async () => {
+    await fs.mkdir(dataRoot, { recursive: true });
+    const temporaryPath = `${orderCachePath}.${process.pid}.${Date.now()}.syncing`;
+    try {
+      await fs.writeFile(temporaryPath, `${JSON.stringify(cleanCache, null, 2)}\n`, 'utf8');
+      await fs.rename(temporaryPath, orderCachePath);
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true });
+      throw error;
+    }
+  });
+  orderCacheWriteQueue = operation;
+  await operation;
 }
 
 function sanitizeOrderCacheEntry(order) {
@@ -711,7 +749,13 @@ function cacheSearch(orders, query, limit) {
 
   return orders.filter((order) => {
     return String(order.id || '').toLocaleLowerCase('it-IT').includes(trimmed)
-      || String(order.reference || '').toLocaleLowerCase('it-IT').includes(trimmed);
+      || String(order.reference || '').toLocaleLowerCase('it-IT').includes(trimmed)
+      || String(order.customerName || '').toLocaleLowerCase('it-IT').includes(trimmed)
+      || (order.products || []).some((product) => (
+        String(product.productId || '').toLocaleLowerCase('it-IT').includes(trimmed)
+        || String(product.productReference || '').toLocaleLowerCase('it-IT').includes(trimmed)
+        || String(product.productName || '').toLocaleLowerCase('it-IT').includes(trimmed)
+      ));
   }).slice(0, max);
 }
 
@@ -1033,6 +1077,9 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
     maxOrders,
     hasMore,
     totalFound: exhausted ? orders.length : null,
+    syncMode: 'full',
+    newCount: orders.length,
+    refreshedCount: 0,
     orders,
   };
   await writeOrderCache(cache);
@@ -1068,7 +1115,9 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     orderDateTo: effectiveConfig.orderDateTo,
   };
   const existingOrders = currentCache.orders.filter((order) => orderMatchesQueryFilters(order, filters));
+  const existingById = new Map(existingOrders.map((order) => [String(order.id), order]));
   const existingIds = new Set(existingOrders.map((order) => String(order.id)));
+  const refreshedOrders = [];
   const newOrders = [];
   let offset = 0;
   let totalFound = 0;
@@ -1118,6 +1167,17 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
       const id = String(order.id || '');
       return id && !existingIds.has(id);
     });
+
+    for (const order of page) {
+      const existing = existingById.get(String(order.id || ''));
+      if (!existing) continue;
+      refreshedOrders.push({
+        ...existing,
+        ...order,
+        customerName: existing.customerName || order.customerName || '',
+        products: hasOrderProducts(existing) ? existing.products : order.products || [],
+      });
+    }
 
     if (!missingPage.length) {
       exhausted = page.length < actualBatchSize;
@@ -1181,7 +1241,9 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     offset += page.length;
   }
 
-  const mergedOrders = dedupeOrdersById(sortOrdersDesc([...newOrders, ...existingOrders])).slice(0, maxOrders);
+  const mergedOrders = dedupeOrdersById(
+    sortOrdersDesc([...newOrders, ...refreshedOrders, ...existingOrders]),
+  ).slice(0, maxOrders);
   const hasMore = !exhausted && mergedOrders.length >= maxOrders;
   const cache = {
     syncedAt: new Date().toISOString(),
@@ -1191,6 +1253,8 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     hasMore,
     totalFound: hasMore ? null : mergedOrders.length,
     syncMode: 'incremental',
+    newCount: newOrders.length,
+    refreshedCount: refreshedOrders.length,
     orders: mergedOrders,
   };
 
@@ -1202,6 +1266,7 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     processedCount,
     importTotal,
     newCount: newOrders.length,
+    refreshedCount: refreshedOrders.length,
     batchSize,
     lastBatchCount,
     maxOrders,
@@ -1235,6 +1300,7 @@ function publicSyncJob(job) {
     trigger: job.trigger,
     incremental: Boolean(job.incremental),
     newCount: job.newCount || 0,
+    refreshedCount: job.refreshedCount || 0,
   };
 }
 
@@ -1257,6 +1323,7 @@ function startOrderCacheSyncJob(config, options = {}) {
     processedCount: 0,
     importTotal: 0,
     newCount: 0,
+    refreshedCount: 0,
     totalFound: null,
     hasMore: false,
     batchSize: cleanBatchSize(config.cacheBatchSize),
@@ -1399,6 +1466,41 @@ function isAuthorized(req) {
     return false;
   }
   return true;
+}
+
+function integrationTokenHash(token) {
+  return createHash('sha256').update(String(token || ''), 'utf8').digest('hex');
+}
+
+function integrationBearerToken(req) {
+  const authorization = String(req.headers.authorization || '');
+  return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+}
+
+async function isIntegrationAuthorized(req) {
+  const token = integrationBearerToken(req);
+  if (!token) return false;
+  const candidate = Buffer.from(integrationTokenHash(token), 'hex');
+  const config = await readLocalConfig();
+  return (config.integrationTokens || []).some((entry) => {
+    const stored = Buffer.from(String(entry?.tokenHash || ''), 'hex');
+    return stored.length === candidate.length && stored.length > 0 && timingSafeEqual(stored, candidate);
+  });
+}
+
+async function requireIntegration(req, res) {
+  if (await isIntegrationAuthorized(req)) return true;
+  res.status(401).json({ error: 'Token integrazione non valido o revocato.' });
+  return false;
+}
+
+function publicIntegrationToken(entry) {
+  return {
+    id: String(entry.id),
+    label: String(entry.label || 'Integrazione browser'),
+    createdAt: String(entry.createdAt || ''),
+    lastUsedAt: String(entry.lastUsedAt || ''),
+  };
 }
 
 function asyncRoute(handler) {
@@ -1553,6 +1655,52 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
   res.json({ ok: true, reauthRequired: passwordChanged });
 }));
 
+app.get('/api/integration-tokens', asyncRoute(async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: 'Sessione non valida o scaduta.' });
+    return;
+  }
+  const config = await readLocalConfig();
+  res.json({ tokens: (config.integrationTokens || []).map(publicIntegrationToken) });
+}));
+
+app.post('/api/integration-tokens', asyncRoute(async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: 'Sessione non valida o scaduta.' });
+    return;
+  }
+  const config = await readLocalConfig();
+  const label = String(req.body?.label || 'Browser PrestaShop').trim().slice(0, 80) || 'Browser PrestaShop';
+  const rawToken = `pso_${randomBytes(32).toString('base64url')}`;
+  const entry = {
+    id: randomBytes(10).toString('hex'),
+    label,
+    tokenHash: integrationTokenHash(rawToken),
+    createdAt: new Date().toISOString(),
+  };
+  await writeLocalConfig({
+    ...config,
+    integrationTokens: [...(config.integrationTokens || []), entry],
+  });
+  res.status(201).json({ token: rawToken, integration: publicIntegrationToken(entry) });
+}));
+
+app.delete('/api/integration-tokens/:id', asyncRoute(async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: 'Sessione non valida o scaduta.' });
+    return;
+  }
+  const config = await readLocalConfig();
+  const current = config.integrationTokens || [];
+  const integrationTokens = current.filter((entry) => String(entry.id) !== String(req.params.id));
+  if (integrationTokens.length === current.length) {
+    res.status(404).json({ error: 'Integrazione non trovata.' });
+    return;
+  }
+  await writeLocalConfig({ ...config, integrationTokens });
+  res.json({ ok: true });
+}));
+
 app.get('/api/order-states', asyncRoute(async (req, res) => {
   if (!(await isAuthorized(req))) {
     res.status(401).json({ error: 'Password locale richiesta.' });
@@ -1580,6 +1728,9 @@ app.get('/api/order-cache/status', asyncRoute(async (req, res) => {
     maxOrders: cache.maxOrders,
     totalFound: cache.totalFound,
     hasMore: cache.hasMore,
+    syncMode: cache.syncMode,
+    newCount: cache.newCount,
+    refreshedCount: cache.refreshedCount,
     activeSync: publicSyncJob(activeJob),
     hourlySync: {
       enabled: Boolean((await getConfig()).cacheHourlySync),
@@ -1602,7 +1753,12 @@ app.post('/api/order-cache/sync', asyncRoute(async (req, res) => {
     return;
   }
 
-  const job = startOrderCacheSyncJob(config);
+  const cache = await readOrderCache();
+  const incremental = cache.orders.length > 0 && cacheMatchesConfig(cache, config);
+  const job = startOrderCacheSyncJob(config, {
+    incremental,
+    trigger: 'manual',
+  });
   res.status(job.status === 'running' ? 202 : 200).json({
     ok: true,
     job: publicSyncJob(job),
@@ -1679,7 +1835,7 @@ app.get('/api/orders', asyncRoute(async (req, res) => {
     return;
   }
 
-  if (sourceMode !== 'live' && canUseCache) {
+  if (!query && sourceMode !== 'live' && canUseCache) {
     let orders = cacheSearch(cacheOrders, query, requestedLimit);
     if (orders.some((order) => !hasOrderProducts(order) || !hasOrderCustomer(order))) {
       const client = await getClient();
@@ -1698,11 +1854,57 @@ app.get('/api/orders', asyncRoute(async (req, res) => {
   }
 
   const client = await getClient();
-  const orders = query
-    ? await client.searchOrders(query, effectiveFilters)
-    : await client.listOrdersPage(effectiveFilters, { limit: requestedLimit });
-  const enrichedOrders = await enrichOrderSummaries(client, orders, Math.min(requestedLimit, 50));
-  res.json({ orders: await applyCanonicalizationToOrders(enrichedOrders), source: 'live' });
+  const cachedMatches = query && canUseCache
+    ? cacheSearch(cacheOrders, query, requestedLimit)
+    : [];
+  let liveOrders = [];
+  try {
+    liveOrders = query
+      ? await client.searchOrders(query, effectiveFilters)
+      : await client.listOrdersPage(effectiveFilters, { limit: requestedLimit });
+  } catch (error) {
+    if (!cachedMatches.length || sourceMode === 'live') throw error;
+    let fallbackOrders = cachedMatches;
+    if (fallbackOrders.some((order) => !hasOrderProducts(order) || !hasOrderCustomer(order))) {
+      fallbackOrders = await enrichOrderSummaries(client, fallbackOrders, Math.min(requestedLimit, 50));
+    }
+    res.json({
+      orders: await applyCanonicalizationToOrders(fallbackOrders),
+      source: 'cache',
+      fallback: true,
+      warning: `PrestaShop non raggiungibile: mostro i risultati sincronizzati. ${errorMessage(error)}`,
+      cache: { syncedAt: cache.syncedAt, count: cache.orders.length },
+    });
+    return;
+  }
+
+  liveOrders = liveOrders.filter((order) => orderMatchesQueryFilters(order, effectiveFilters));
+  const enrichedLiveOrders = await enrichOrderSummaries(
+    client,
+    liveOrders,
+    Math.min(requestedLimit, 50),
+  );
+  const mergedOrders = dedupeOrdersById([
+    ...enrichedLiveOrders,
+    ...cachedMatches,
+  ]).slice(0, requestedLimit);
+
+  if (query && canUseCache && enrichedLiveOrders.length) {
+    const updatedCache = {
+      ...cache,
+      orders: dedupeOrdersById(
+        sortOrdersDesc([...enrichedLiveOrders, ...cache.orders]),
+      ).slice(0, cleanMaxCacheOrders(config.cacheMaxOrders)),
+    };
+    await writeOrderCache(updatedCache);
+  }
+
+  res.json({
+    orders: await applyCanonicalizationToOrders(mergedOrders),
+    source: cachedMatches.length && enrichedLiveOrders.length ? 'hybrid' : 'live',
+    liveLookup: Boolean(query),
+    cache: canUseCache ? { syncedAt: cache.syncedAt, count: cache.orders.length } : null,
+  });
 }));
 
 app.get('/api/orders/:id', asyncRoute(async (req, res) => {
@@ -1912,61 +2114,44 @@ app.get('/api/backups/:fileName', asyncRoute(async (req, res) => {
   res.download(filePath, fileName);
 }));
 
-app.post('/api/order-details/preview-replace-product', asyncRoute(async (req, res) => {
-  if (!(await isAuthorized(req))) {
-    res.status(401).json({ error: 'Password locale richiesta.' });
-    return;
-  }
-
-  const { orderDetailIds, productId } = req.body || {};
-
+async function buildReplacementPreview(orderDetailIds, productId) {
   if (!Array.isArray(orderDetailIds) || orderDetailIds.length === 0) {
-    res.status(400).json({ error: 'Seleziona almeno una riga ordine.' });
-    return;
+    const error = new Error('Seleziona almeno una riga ordine.');
+    error.statusCode = 400;
+    throw error;
   }
-
   if (!productId) {
-    res.status(400).json({ error: 'Seleziona il prodotto da inserire.' });
-    return;
+    const error = new Error('Seleziona il prodotto da inserire.');
+    error.statusCode = 400;
+    throw error;
   }
-
   const client = await getClient();
   const previews = [];
-
   for (const orderDetailId of orderDetailIds) {
     const prepared = await client.prepareOrderRowProductReplacement(orderDetailId, productId);
     previews.push(prepared.preview);
   }
-
   const productKeys = new Set(previews.map((preview) => `${preview.oldProductId}|${preview.oldProductReference}`));
-  res.json({
+  return {
     previews,
     sameOriginalProduct: productKeys.size <= 1,
-  });
-}));
+  };
+}
 
-app.post('/api/order-details/replace-product', asyncRoute(async (req, res) => {
-  if (!(await isAuthorized(req))) {
-    res.status(401).json({ error: 'Password locale richiesta.' });
-    return;
-  }
-
-  const { orderDetailIds, productId, simulate = false } = req.body || {};
-
+async function replaceOrderDetails(orderDetailIds, productId, simulate = false) {
   if (!Array.isArray(orderDetailIds) || orderDetailIds.length === 0) {
-    res.status(400).json({ error: 'Seleziona almeno una riga ordine.' });
-    return;
+    const error = new Error('Seleziona almeno una riga ordine.');
+    error.statusCode = 400;
+    throw error;
   }
-
   if (!productId) {
-    res.status(400).json({ error: 'Seleziona il prodotto da inserire.' });
-    return;
+    const error = new Error('Seleziona il prodotto da inserire.');
+    error.statusCode = 400;
+    throw error;
   }
-
   const client = await getClient();
   const results = [];
   const errors = [];
-
   for (const orderDetailId of orderDetailIds) {
     const startedAt = new Date().toISOString();
 
@@ -2018,11 +2203,87 @@ app.post('/api/order-details/replace-product', asyncRoute(async (req, res) => {
       });
     }
   }
-
-  res.json({
+  return {
     updated: results,
     errors,
+  };
+}
+
+app.post('/api/order-details/preview-replace-product', asyncRoute(async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: 'Password locale richiesta.' });
+    return;
+  }
+  const { orderDetailIds, productId } = req.body || {};
+  res.json(await buildReplacementPreview(orderDetailIds, productId));
+}));
+
+app.post('/api/order-details/replace-product', asyncRoute(async (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: 'Password locale richiesta.' });
+    return;
+  }
+  const { orderDetailIds, productId, simulate = false } = req.body || {};
+  res.json(await replaceOrderDetails(orderDetailIds, productId, simulate));
+}));
+
+app.get('/api/integration/config', asyncRoute(async (req, res) => {
+  if (!(await requireIntegration(req, res))) return;
+  const config = await getConfig();
+  res.json({
+    requirePreflightCheck: config.requirePreflightCheck,
+    requireConfirmCheck: config.requireConfirmCheck,
   });
+}));
+
+app.get('/api/integration/orders/:id', asyncRoute(async (req, res) => {
+  if (!(await requireIntegration(req, res))) return;
+  const client = await getClient();
+  const order = await client.getOrderDetails(req.params.id);
+  res.json({ order: await applyCanonicalizationToOrder(order) });
+}));
+
+app.get('/api/integration/products', asyncRoute(async (req, res) => {
+  if (!(await requireIntegration(req, res))) return;
+  const query = String(req.query.q || '').trim();
+  const source = String(req.query.source || 'all');
+  if (query.length < 2) {
+    res.json({ products: [] });
+    return;
+  }
+  const templates = (await searchProductTemplates(query, 8))
+    .map((product) => ({ ...product, source: 'quick' }));
+  if (source === 'quick') {
+    res.json({ products: templates });
+    return;
+  }
+  const client = await getClient();
+  const liveProducts = (await client.searchProducts(query))
+    .map((product) => ({ ...product, source: 'prestashop' }));
+  const byId = new Map();
+  for (const product of [...templates, ...liveProducts]) {
+    const id = String(product.id || '');
+    if (id && !byId.has(id)) byId.set(id, product);
+  }
+  res.json({ products: [...byId.values()].slice(0, 20) });
+}));
+
+app.post('/api/integration/order-details/preview', asyncRoute(async (req, res) => {
+  if (!(await requireIntegration(req, res))) return;
+  const { orderDetailIds, productId } = req.body || {};
+  res.json(await buildReplacementPreview(orderDetailIds, productId));
+}));
+
+app.post('/api/integration/order-details/verify', asyncRoute(async (req, res) => {
+  if (!(await requireIntegration(req, res))) return;
+  const { orderDetailIds, productId } = req.body || {};
+  res.json(await replaceOrderDetails(orderDetailIds, productId, true));
+}));
+
+app.post('/api/integration/order-details/apply', asyncRoute(async (req, res) => {
+  if (!(await requireIntegration(req, res))) return;
+  const { orderDetailIds, productId } = req.body || {};
+  res.json(await replaceOrderDetails(orderDetailIds, productId, false));
 }));
 
 app.use((error, req, res, next) => {

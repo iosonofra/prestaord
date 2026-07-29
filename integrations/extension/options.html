@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="it">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PrestaShop Order Console</title><link rel="stylesheet" href="options.css"></head>
+<body><main><h1>Collega Order Console</h1><p>Inserisci l’indirizzo raggiungibile della web app e il token creato in <strong>Impostazioni → Integrazione browser</strong>.</p>
+<form><label>URL web app<input name="backendUrl" type="url" placeholder="https://ordini.example.it oppure http://192.168.1.20:3000" required></label>
+<label>Token integrazione<input name="integrationToken" type="password" autocomplete="off" placeholder="pso_…" required></label>
+<label>Indirizzo pannello PrestaShop<input name="prestashopOrigin" type="url" placeholder="https://shop.example.it" required></label>
+<button>Salva e attiva</button><output></output></form>
+<small>Senza Cloudflare Access il token protegge comunque le sole API operative. Usa HTTPS se accedi da Internet.</small></main><script src="options.js"></script></body></html>

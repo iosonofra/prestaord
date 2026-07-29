@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "PrestaShop Order Console",
+  "version": "1.3.3",
+  "description": "Modifica in sicurezza i prodotti di un ordine dalla pagina PrestaShop.",
+  "permissions": ["storage", "scripting"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "scripts": ["background.js"] },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "action": { "default_title": "PrestaShop Order Console" },
+  "browser_specific_settings": { "gecko": { "id": "prestashop-order-console@iosonofra", "strict_min_version": "121.0" } }
+}

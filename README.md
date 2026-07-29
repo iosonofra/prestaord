@@ -53,6 +53,21 @@ Per impostazione predefinita il server ascolta soltanto su `127.0.0.1`. Se
 imposti `HOST` su un'interfaccia di rete, l'avvio viene rifiutato finché non è
 configurata una password applicativa.
 
+## Estensione Chrome, Firefox e userscript
+
+In **Impostazioni → Integrazione browser** puoi creare un token revocabile e
+scaricare i tre client per modificare i prodotti direttamente dalla pagina
+ordine di PrestaShop. I pacchetti vengono generati automaticamente da
+`npm install`; per rigenerarli manualmente usa:
+
+```sh
+npm run integrations:build
+```
+
+La guida di installazione e le indicazioni per l'uso tramite IP, anche senza
+Cloudflare Access, sono in
+[docs/INTEGRAZIONI-BROWSER.md](docs/INTEGRAZIONI-BROWSER.md).
+
 ## Interfaccia
 
 L'app e organizzata come console operativa:

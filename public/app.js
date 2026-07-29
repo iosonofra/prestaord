@@ -669,7 +669,7 @@ function updateSafetyGate() {
   els.simulationState.className = '';
   if (!hasSelection) {
     els.simulationState.textContent = 'Non eseguita';
-    els.simulationGate.textContent = 'Seleziona righe e prodotto, poi apri la modifica.';
+    els.simulationGate.textContent = 'Seleziona righe e prodotto, poi apri la revisione.';
     els.simulationGate.className = 'gateNotice';
     return;
   }
@@ -759,6 +759,7 @@ async function loadSettings() {
 }
 
 function unlockApp() {
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   els.unlockDialog.hidden = false;
   els.unlockPassword.value = '';
   els.unlockError.hidden = true;
@@ -770,11 +771,39 @@ function unlockApp() {
       els.unlockDialog.hidden = true;
       els.unlockForm.removeEventListener('submit', handleSubmit);
       els.cancelUnlock.removeEventListener('click', handleCancel);
+      els.unlockDialog.removeEventListener('keydown', handleDialogKeydown);
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus({ preventScroll: true });
     };
 
     const handleCancel = () => {
       cleanup();
       reject(new Error('Password locale richiesta.'));
+    };
+
+    const handleDialogKeydown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        handleCancel();
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+      const focusable = [...els.unlockDialog.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')]
+        .filter((element) => !element.disabled && element.offsetParent !== null);
+      if (!focusable.length) {
+        event.preventDefault();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
 
     const handleSubmit = async (event) => {
@@ -802,6 +831,7 @@ function unlockApp() {
 
     els.unlockForm.addEventListener('submit', handleSubmit);
     els.cancelUnlock.addEventListener('click', handleCancel);
+    els.unlockDialog.addEventListener('keydown', handleDialogKeydown);
   });
 }
 
@@ -829,7 +859,6 @@ async function saveSettings(event) {
   state.defaultOrderState = els.defaultOrderState.value;
   state.requireConfirmCheck = els.requireConfirmCheck.checked;
   setStatus('Impostazioni salvate', 'ok');
-  showToast('Impostazioni salvate', 'ok');
   updateSaveSyncNotice();
   if (els.cacheAutoSync.checked) {
     setStatus('Impostazioni salvate, avvio sincronizzazione cache...', 'neutral');
@@ -953,7 +982,7 @@ function updateReplaceState() {
     : 'Nessuna selezione';
   els.selectionActionBar.hidden = state.selectedOrders.size === 0;
   els.selectionActionTitle.textContent = state.selectedProduct
-    ? `Pronto per modifica con ${state.selectedRows.size} righe`
+    ? `Pronto per revisione con ${state.selectedRows.size} righe`
     : state.selectedRows.size
       ? 'Scegli il prodotto destinazione'
       : 'Seleziona le righe da modificare';
@@ -1004,7 +1033,7 @@ function renderSelectedOrderRows() {
     const tr = document.createElement('tr');
     tr.className = `detailRow ${state.selectedRows.has(row.id) ? 'active' : ''}`;
     tr.innerHTML = `
-      <td class="checkCell" data-label="Seleziona"><input class="rowCheck" type="checkbox" value="${escapeHtml(row.id)}" ${state.selectedRows.has(row.id) ? 'checked' : ''} /></td>
+      <td class="checkCell" data-label="Seleziona"><input class="rowCheck" type="checkbox" value="${escapeHtml(row.id)}" ${state.selectedRows.has(row.id) ? 'checked' : ''} aria-label="Seleziona riga ${escapeHtml(row.id)} dell'ordine ${escapeHtml(row.order.id)}: ${escapeHtml(row.productName)}" /></td>
       <td data-label="Ordine">#${escapeHtml(row.order.id)}<br>${escapeHtml(row.order.reference)}</td>
       <td data-label="Prodotto">${escapeHtml(row.productName)}</td>
       <td data-label="Riferimento">${escapeHtml(row.productReference || '-')}</td>
@@ -1061,7 +1090,7 @@ function renderPreview(previews, sameOriginalProduct) {
   const rowLabel = previews.length === 1 ? '1 riga' : `${previews.length} righe`;
   const orderLabel = orderCount === 1 ? '1 ordine' : `${orderCount} ordini`;
   const selectedLabel = previews.length === 1 ? 'selezionata' : 'selezionate';
-  els.previewTitle.textContent = previews.length === 1 ? 'Modifica prodotto ordine' : 'Modifica prodotti ordini';
+  els.previewTitle.textContent = previews.length === 1 ? 'Revisione prodotto ordine' : 'Revisione prodotti ordini';
   els.previewMeta.textContent = `${rowLabel} ${selectedLabel} su ${orderLabel}. Controlla il cambio e applica quando e sbloccato.`;
   els.previewRows.innerHTML = '';
   els.previewWarning.hidden = !checks.warnings.length || checks.blocking.length > 0;
@@ -1230,7 +1259,7 @@ function renderResult(data, simulated = false) {
 
 async function previewReplacement() {
   validateCurrentSelection();
-  setStatus('Preparo modifica...');
+  setStatus('Preparo revisione...');
   const data = await api('/api/order-details/preview-replace-product', {
     method: 'POST',
     body: JSON.stringify({
@@ -1239,7 +1268,7 @@ async function previewReplacement() {
     }),
   });
   renderPreview(data.previews, data.sameOriginalProduct);
-  setStatus('Modifica pronta', 'ok');
+  setStatus('Revisione pronta', 'ok');
   return data;
 }
 
@@ -1268,7 +1297,6 @@ async function simulateReplacement({ showResult = true } = {}) {
   state.lastSimulationResult = data;
   if (showResult) renderResult(data, true);
   setStatus(data.errors?.length ? 'Verifica con errori' : 'Verifica completata', data.errors?.length ? 'error' : 'ok');
-  if (!data.errors?.length) showToast('Verifica completata', 'ok');
   updateSafetyGate();
   return data;
 }
@@ -1606,8 +1634,7 @@ async function searchProducts(autoSelectId = '', options = {}) {
       document.querySelectorAll('#products .item').forEach((item) => item.classList.remove('active'));
       button.classList.add('active');
       invalidateSafetyState();
-      setStatus('Prodotto selezionato', 'ok');
-      showToast(`Prodotto selezionato: ${product.name}`, 'ok');
+      setStatus(`Prodotto selezionato: ${product.name}`, 'ok');
     });
     if (autoSelectId && String(product.id) === String(autoSelectId)) {
       autoSelectButton = button;
@@ -1699,7 +1726,7 @@ async function downloadBackup(fileName) {
 
 els.searchOrders.addEventListener('click', () => runWithBusy(els.searchOrders, 'Cerco...', searchOrders).catch((error) => setStatus(error.message, 'error')));
 els.searchProducts.addEventListener('click', () => runWithBusy(els.searchProducts, 'Cerco...', () => searchProducts()).catch((error) => setStatus(error.message, 'error')));
-els.replaceButton.addEventListener('click', () => runWithBusy(els.replaceButton, 'Preparo...', replaceProduct).catch((error) => setStatus(error.message, 'error')));
+els.replaceButton.addEventListener('click', () => runWithBusy(els.replaceButton, 'Preparo revisione...', replaceProduct).catch((error) => setStatus(error.message, 'error')));
 els.simulateButton.addEventListener('click', () => runWithBusy(els.simulateButton, 'Simulo...', simulateReplacement).catch((error) => setStatus(error.message, 'error')));
 els.barPreviewButton.addEventListener('click', () => els.replaceButton.click());
 els.barSimulateButton.addEventListener('click', () => els.simulateButton.click());

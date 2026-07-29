@@ -88,9 +88,9 @@
               <span id="selectionActionMeta">Seleziona ordini e righe per procedere.</span>
             </div>
             <div class="selectionActions">
-              <button id="barSelectSameRows" class="ghostButton" type="button" disabled>Righe uguali</button>
+              <button id="barSelectSameRows" class="ghostButton" type="button" disabled>Stesso prodotto</button>
               <button id="barSimulateButton" type="button" disabled hidden>Simula</button>
-              <button id="barPreviewButton" class="primary" type="button" disabled>Modifica</button>
+              <button id="barPreviewButton" class="primary" type="button" disabled>Apri revisione</button>
             </div>
           </section>
 
@@ -208,9 +208,9 @@
                   <p class="mutedText" id="selectionSummary">0 ordini selezionati - 0 righe selezionate</p>
                 </div>
                 <div class="headerActions">
-                  <button id="selectSameRows" class="ghostButton" type="button" disabled>Righe uguali</button>
+                  <button id="selectSameRows" class="ghostButton" type="button" disabled>Stesso prodotto</button>
                   <button id="simulateButton" class="ghostButton" type="button" disabled hidden>Simula</button>
-                  <button id="replaceButton" class="primary" type="button" disabled>Modifica</button>
+                  <button id="replaceButton" class="primary" type="button" disabled>Apri revisione</button>
                 </div>
               </div>
               <div class="tableWrap tallTable">
@@ -233,10 +233,27 @@
                   </tbody>
                 </table>
               </div>
+            </div>
+
+            <div class="panel productPanel">
+              <div class="panelHeader">
+                <div>
+                  <h2>Sostituzione</h2>
+                  <p class="mutedText">Scegli il prodotto destinazione, verifica l'impatto e conferma.</p>
+                </div>
+              </div>
+              <div class="searchRow">
+                <input id="productSearch" placeholder="Nome, riferimento o ID" aria-label="Cerca prodotti" />
+                <button id="searchProducts" type="button">Cerca</button>
+              </div>
+              <div id="productTemplateSuggestions" class="suggestionList" hidden></div>
+              <div id="productResults" class="productResults">
+                <div id="products" class="list denseList" aria-live="polite"></div>
+              </div>
               <section class="modifyPanel" id="previewPanel" hidden aria-labelledby="previewTitle">
                 <div class="modifyPanelHeader">
                   <div>
-                    <h2 id="previewTitle">Modifica non ancora confermata</h2>
+                    <h2 id="previewTitle">Revisione non ancora confermata</h2>
                     <p class="mutedText" id="previewMeta">Rivedi prodotti, quantita e totali.</p>
                   </div>
                   <button id="closePreview" class="ghostButton" type="button">Chiudi</button>
@@ -263,20 +280,6 @@
                   </div>
                 </div>
               </section>
-            </div>
-
-            <div class="panel productPanel">
-              <div class="panelHeader">
-                <h2>Prodotto destinazione</h2>
-              </div>
-              <div class="searchRow">
-                <input id="productSearch" placeholder="Nome, riferimento o ID" aria-label="Cerca prodotti" />
-                <button id="searchProducts" type="button">Cerca</button>
-              </div>
-              <div id="productTemplateSuggestions" class="suggestionList" hidden></div>
-              <div id="productResults" class="productResults">
-                <div id="products" class="list denseList" aria-live="polite"></div>
-              </div>
             </div>
           </section>
 
