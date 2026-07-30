@@ -1997,6 +1997,56 @@ input[type='checkbox'] {
   background: var(--color-surface-2);
 }
 
+.hourlySchedulerStatus {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  border: 1px solid color-mix(in oklch, var(--color-success), var(--color-rule) 65%);
+  border-radius: var(--radius-card);
+  background: color-mix(in oklch, var(--color-success), white 93%);
+}
+
+.hourlySchedulerStatus.error {
+  border-color: color-mix(in oklch, var(--color-danger), var(--color-rule) 65%);
+  background: color-mix(in oklch, var(--color-danger), white 94%);
+}
+
+.hourlySchedulerIcon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-success);
+}
+
+.hourlySchedulerStatus.error .hourlySchedulerIcon {
+  color: var(--color-danger);
+}
+
+.hourlySchedulerIcon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.hourlySchedulerStatus > div {
+  display: grid;
+  gap: 2px;
+}
+
+.hourlySchedulerStatus strong {
+  color: var(--color-ink);
+  font-size: var(--text-xs);
+}
+
+.hourlySchedulerStatus small {
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
 .settingsInlineAction > div {
   display: grid;
   gap: 2px;

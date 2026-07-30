@@ -70,7 +70,21 @@ async function zipFolder(folder, destination) {
 
 await fs.rm(output, { recursive: true, force: true });
 await fs.mkdir(output, { recursive: true });
-const panel = await fs.readFile(path.join(source, 'shared', 'panel.js'), 'utf8');
+const chromeManifestPath = path.join(source, 'extension', 'manifest.chrome.json');
+const firefoxManifestPath = path.join(source, 'extension', 'manifest.firefox.json');
+const chromeManifest = JSON.parse(await fs.readFile(chromeManifestPath, 'utf8'));
+const firefoxManifest = JSON.parse(await fs.readFile(firefoxManifestPath, 'utf8'));
+if (chromeManifest.version !== firefoxManifest.version) {
+  throw new Error(
+    `Versioni integrazioni non allineate: Chrome ${chromeManifest.version}, Firefox ${firefoxManifest.version}.`,
+  );
+}
+const integrationVersion = chromeManifest.version;
+const panelTemplate = await fs.readFile(path.join(source, 'shared', 'panel.js'), 'utf8');
+if (!panelTemplate.includes('__INTEGRATION_VERSION__')) {
+  throw new Error('Segnaposto __INTEGRATION_VERSION__ mancante nel pannello condiviso.');
+}
+const panel = panelTemplate.replaceAll('__INTEGRATION_VERSION__', integrationVersion);
 
 for (const browser of ['chrome', 'firefox']) {
   const folder = path.join(output, browser);
@@ -84,7 +98,7 @@ for (const browser of ['chrome', 'firefox']) {
 const userscriptHeader = `// ==UserScript==
 // @name         PrestaShop Order Console
 // @namespace    https://github.com/iosonofra/prestaord
-// @version      1.3.3
+// @version      ${integrationVersion}
 // @description  Modifica i prodotti dell'ordine dalla pagina PrestaShop
 // @match        http://*/*
 // @match        https://*/*
@@ -92,6 +106,7 @@ const userscriptHeader = `// ==UserScript==
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        window.onurlchange
 // @connect      *
 // @run-at       document-idle
 // ==/UserScript==

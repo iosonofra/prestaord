@@ -39,10 +39,17 @@ const sessionTtlMs = Number.isFinite(requestedSessionTtlMs) && requestedSessionT
 const sessions = new Map();
 const orderCacheSyncJobs = new Map();
 let activeOrderCacheSyncJobId = '';
-const orderCacheHourlyIntervalMs = 60 * 60 * 1000;
+const requestedOrderCacheHourlyIntervalMs = Number(process.env.ORDER_CACHE_HOURLY_INTERVAL_MS || 60 * 60 * 1000);
+const orderCacheHourlyIntervalMs = Number.isFinite(requestedOrderCacheHourlyIntervalMs)
+  ? Math.max(Math.trunc(requestedOrderCacheHourlyIntervalMs), 50)
+  : 60 * 60 * 1000;
 let orderCacheHourlyTimer = null;
 let orderCacheHourlyNextRunAt = '';
 let orderCacheHourlyLastRunAt = '';
+let orderCacheHourlyLastSuccessAt = '';
+let orderCacheHourlyLastError = '';
+let orderCacheHourlyLastJobId = '';
+let pendingOrderCacheSync = null;
 let productTemplatesCache = {
   mtimeMs: 0,
   products: [],
@@ -372,7 +379,12 @@ function stripHtml(value) {
 }
 
 function normalizeSearch(value) {
-  return String(value || '').toLocaleLowerCase('it-IT');
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLocaleLowerCase('it-IT')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 async function readProductTemplates() {
@@ -716,18 +728,40 @@ async function writeOrderCache(cache) {
     orders: Array.isArray(cache.orders) ? cache.orders.map(sanitizeOrderCacheEntry) : [],
   };
   const operation = orderCacheWriteQueue.catch(() => {}).then(async () => {
-    await fs.mkdir(dataRoot, { recursive: true });
-    const temporaryPath = `${orderCachePath}.${process.pid}.${Date.now()}.syncing`;
-    try {
-      await fs.writeFile(temporaryPath, `${JSON.stringify(cleanCache, null, 2)}\n`, 'utf8');
-      await fs.rename(temporaryPath, orderCachePath);
-    } catch (error) {
-      await fs.rm(temporaryPath, { force: true });
-      throw error;
-    }
+    await persistOrderCache(cleanCache);
   });
   orderCacheWriteQueue = operation;
   await operation;
+}
+
+async function persistOrderCache(cache) {
+  await fs.mkdir(dataRoot, { recursive: true });
+  const temporaryPath = `${orderCachePath}.${process.pid}.${Date.now()}.syncing`;
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(cache, null, 2)}\n`, 'utf8');
+    await fs.rename(temporaryPath, orderCachePath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true });
+    throw error;
+  }
+}
+
+async function mutateOrderCache(mutator) {
+  const operation = orderCacheWriteQueue.catch(() => {}).then(async () => {
+    const latestCache = await readOrderCache();
+    const nextCache = await mutator(latestCache);
+    if (!nextCache) return latestCache;
+    const cleanCache = {
+      ...nextCache,
+      orders: Array.isArray(nextCache.orders)
+        ? nextCache.orders.map(sanitizeOrderCacheEntry)
+        : [],
+    };
+    await persistOrderCache(cleanCache);
+    return cleanCache;
+  });
+  orderCacheWriteQueue = operation;
+  return operation;
 }
 
 function sanitizeOrderCacheEntry(order) {
@@ -737,69 +771,113 @@ function sanitizeOrderCacheEntry(order) {
     notesUnavailable,
     messages,
     messagesUnavailable,
+    productsError,
     ...cleanOrder
   } = order || {};
   return cleanOrder;
 }
 
 function cacheSearch(orders, query, limit) {
-  const trimmed = String(query || '').trim().toLocaleLowerCase('it-IT');
+  const trimmed = normalizeSearch(query);
   const max = Math.min(Math.max(Number(limit || 20), 1), 1000);
   if (!trimmed) return orders.slice(0, max);
 
   return orders.filter((order) => {
-    return String(order.id || '').toLocaleLowerCase('it-IT').includes(trimmed)
-      || String(order.reference || '').toLocaleLowerCase('it-IT').includes(trimmed)
-      || String(order.customerName || '').toLocaleLowerCase('it-IT').includes(trimmed)
+    return normalizeSearch(order.id).includes(trimmed)
+      || normalizeSearch(order.reference).includes(trimmed)
+      || normalizeSearch(order.customerName).includes(trimmed)
       || (order.products || []).some((product) => (
-        String(product.productId || '').toLocaleLowerCase('it-IT').includes(trimmed)
-        || String(product.productReference || '').toLocaleLowerCase('it-IT').includes(trimmed)
-        || String(product.productName || '').toLocaleLowerCase('it-IT').includes(trimmed)
+        normalizeSearch(product.productId).includes(trimmed)
+        || normalizeSearch(product.productReference).includes(trimmed)
+        || normalizeSearch(product.productName).includes(trimmed)
       ));
   }).slice(0, max);
 }
 
 function hasOrderProducts(order) {
-  return Array.isArray(order?.products) && order.products.length > 0;
+  return order?.productsLoaded === true
+    || (Array.isArray(order?.products) && order.products.length > 0);
 }
 
 function hasOrderCustomer(order) {
   return Boolean(String(order?.customerName || '').trim());
 }
 
+function isRetryablePrestashopReadError(error) {
+  const status = Number(error?.status || 0);
+  return !status || status === 408 || status === 429 || status >= 500;
+}
+
+async function retryPrestashopRead(operation, attempts = 2) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryablePrestashopReadError(error) || attempt === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function enrichOrderProducts(client, orders, limit = 50, onProgress = () => {}) {
   const max = Math.min(Math.max(Number(limit || 0), 0), orders.length);
-  const enriched = [];
-
-  for (let index = 0; index < orders.length; index += 1) {
-    const order = orders[index];
-    if (index >= max || hasOrderProducts(order)) {
-      enriched.push(order);
-      onProgress({ processedInBatch: index + 1, totalInBatch: max });
-      continue;
-    }
-
+  const targetOrders = orders.slice(0, max);
+  let processedInBatch = 0;
+  const enrichedTargets = await mapWithConcurrency(targetOrders, 4, async (order) => {
+    let enrichedOrder = order;
     try {
-      const details = await client.getOrderDetails(order.id, { timeoutMs: 12000 });
-      const products = details.rows.map((row) => ({
-        id: row.id,
-        productId: row.productId,
-        productName: row.productName,
-        productReference: row.productReference,
-        productQuantity: row.productQuantity,
-      }));
-      enriched.push({
+      if (!hasOrderProducts(order)) {
+        const details = await retryPrestashopRead(
+          () => client.getOrderDetails(order.id, { timeoutMs: 12000 }),
+          2,
+        );
+        const products = details.rows.map((row) => ({
+          id: row.id,
+          productId: row.productId,
+          productName: row.productName,
+          productReference: row.productReference,
+          productQuantity: row.productQuantity,
+        }));
+        const { productsUnavailable, productsError, ...cleanOrder } = order;
+        enrichedOrder = {
+          ...cleanOrder,
+          customerId: order.customerId || details.customerId,
+          products,
+          productsLoaded: true,
+        };
+      }
+    } catch (error) {
+      enrichedOrder = {
         ...order,
-        customerId: order.customerId || details.customerId,
-        products,
-      });
-    } catch {
-      enriched.push({ ...order, products: [] });
+        products: [],
+        productsLoaded: false,
+        productsUnavailable: true,
+      };
+    } finally {
+      processedInBatch += 1;
+      onProgress({ processedInBatch, totalInBatch: max });
     }
-    onProgress({ processedInBatch: index + 1, totalInBatch: max });
-  }
+    return enrichedOrder;
+  });
 
-  return enriched;
+  return [...enrichedTargets, ...orders.slice(max)];
 }
 
 function isPrestashopTimeout(error) {
@@ -834,15 +912,13 @@ function dedupeOrdersById(orders) {
 
 async function listOrdersPageAdaptive(client, filters, { offset = 0, limit = 50 } = {}, onProgress = () => {}) {
   let currentLimit = Math.min(Math.max(Math.trunc(Number(limit || 50)), 1), 100);
-  let lastError = null;
 
-  while (currentLimit >= 10) {
+  while (true) {
     try {
       const page = await client.listOrdersPage(filters, { offset, limit: currentLimit });
       return { page, batchLimit: currentLimit };
     } catch (error) {
-      lastError = error;
-      if (!isPrestashopRecoverableListError(error) || currentLimit <= 10) break;
+      if (!isPrestashopRecoverableListError(error) || currentLimit <= 10) throw error;
       currentLimit = Math.max(10, Math.floor(currentLimit / 2));
       onProgress({
         phase: 'retrying',
@@ -851,8 +927,6 @@ async function listOrdersPageAdaptive(client, filters, { offset = 0, limit = 50 
       });
     }
   }
-
-  throw lastError;
 }
 
 async function enrichOrderCustomers(client, orders, limit = 100) {
@@ -865,7 +939,10 @@ async function enrichOrderCustomers(client, orders, limit = 100) {
   if (!customerIds.length) return orders;
 
   try {
-    const customers = await client.listCustomersByIds(customerIds);
+    const customers = await retryPrestashopRead(
+      () => client.listCustomersByIds(customerIds),
+      2,
+    );
     const customerById = new Map(customers.map((customer) => [String(customer.id), customer]));
     return orders.map((order) => {
       const customer = customerById.get(String(order.customerId));
@@ -889,6 +966,7 @@ function orderMatchesQueryFilters(order, filters = {}) {
   const dateAdd = String(order.dateAdd || order.date_add || '').slice(0, 10);
 
   if (states.length && !states.includes(String(order.currentState || order.current_state || ''))) return false;
+  if ((dateFrom || dateTo) && !dateAdd) return false;
   if (dateFrom && dateAdd && dateAdd < dateFrom) return false;
   if (dateTo && dateAdd && dateAdd > dateTo) return false;
   return true;
@@ -961,6 +1039,7 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
     orderDateTo: effectiveConfig.orderDateTo,
   };
   const orders = [];
+  const seenOrderIds = new Set();
   let offset = 0;
   let totalFound = 0;
   let processedCount = 0;
@@ -1002,7 +1081,13 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
     }));
     lastBatchCount = page.length;
     totalFound += page.length;
-    importTotal += page.length;
+    const uniquePage = page.filter((order) => {
+      const id = String(order?.id || '');
+      if (!id || seenOrderIds.has(id)) return false;
+      seenOrderIds.add(id);
+      return true;
+    }).slice(0, Math.max(maxOrders - orders.length, 0));
+    importTotal += uniquePage.length;
 
     onProgress({
       phase: 'enriching',
@@ -1016,7 +1101,7 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
       maxOrders,
       filters,
     });
-    const enrichedPage = await enrichOrderSummaries(client, page, page.length, ({ processedInBatch }) => {
+    const enrichedPage = await enrichOrderSummaries(client, uniquePage, uniquePage.length, ({ processedInBatch }) => {
       processedCount = orders.length + processedInBatch;
       onProgress({
         phase: 'enriching',
@@ -1033,6 +1118,7 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
     });
     orders.push(...enrichedPage);
     processedCount = orders.length;
+    offset += page.length;
 
     onProgress({
       phase: 'saving',
@@ -1047,18 +1133,21 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
       filters,
     });
 
+    if (!page.length) {
+      exhausted = true;
+      break;
+    }
     if (page.length < actualBatchSize) {
       exhausted = true;
       break;
     }
-    offset += page.length;
   }
 
   let hasMore = false;
   if (!exhausted && orders.length >= maxOrders && lastBatchCount > 0) {
     try {
       const { page: nextPage } = await listOrdersPageAdaptive(client, filters, {
-        offset: orders.length,
+        offset,
         limit: 1,
       });
       hasMore = nextPage.length > 0;
@@ -1080,7 +1169,7 @@ async function syncOrderCache(config = null, onProgress = () => {}) {
     syncMode: 'full',
     newCount: orders.length,
     refreshedCount: 0,
-    orders,
+    orders: sortOrdersDesc(dedupeOrdersById(orders)).slice(0, maxOrders),
   };
   await writeOrderCache(cache);
   onProgress({
@@ -1116,9 +1205,10 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
   };
   const existingOrders = currentCache.orders.filter((order) => orderMatchesQueryFilters(order, filters));
   const existingById = new Map(existingOrders.map((order) => [String(order.id), order]));
-  const existingIds = new Set(existingOrders.map((order) => String(order.id)));
-  const refreshedOrders = [];
-  const newOrders = [];
+  const liveOrdersById = new Map();
+  const scannedIds = new Set();
+  let newCount = 0;
+  let refreshedCount = 0;
   let offset = 0;
   let totalFound = 0;
   let processedCount = 0;
@@ -1137,8 +1227,8 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     filters,
   });
 
-  while (newOrders.length < maxOrders) {
-    const savedCount = Math.min(existingOrders.length + newOrders.length, maxOrders);
+  while (scannedIds.size < maxOrders) {
+    const savedCount = liveOrdersById.size;
     onProgress({
       phase: 'fetching',
       foundCount: totalFound,
@@ -1151,7 +1241,7 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
 
     const { page, batchLimit: actualBatchSize } = await listOrdersPageAdaptive(client, filters, {
       offset,
-      limit: Math.min(batchSize, maxOrders - newOrders.length),
+      limit: Math.min(batchSize, maxOrders - scannedIds.size),
     }, (progress) => onProgress({
       ...progress,
       foundCount: totalFound,
@@ -1162,50 +1252,43 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     }));
     lastBatchCount = page.length;
     totalFound += page.length;
-
-    const missingPage = page.filter((order) => {
+    const uniquePage = page.filter((order) => {
       const id = String(order.id || '');
-      return id && !existingIds.has(id);
+      if (!id || scannedIds.has(id)) return false;
+      scannedIds.add(id);
+      return true;
     });
-
-    for (const order of page) {
+    const enrichmentPage = [];
+    for (const order of uniquePage) {
       const existing = existingById.get(String(order.id || ''));
-      if (!existing) continue;
-      refreshedOrders.push({
-        ...existing,
-        ...order,
-        customerName: existing.customerName || order.customerName || '',
-        products: hasOrderProducts(existing) ? existing.products : order.products || [],
-      });
+      if (existing) {
+        const productsAreCurrent = hasOrderProducts(existing)
+          && Boolean(String(existing.dateUpd || '').trim())
+          && String(existing.dateUpd) === String(order.dateUpd || '');
+        const refreshedOrder = {
+          ...existing,
+          ...order,
+          customerName: existing.customerName || order.customerName || '',
+          products: productsAreCurrent ? existing.products : order.products || [],
+          productsLoaded: productsAreCurrent ? existing.productsLoaded : false,
+        };
+        if (hasOrderProducts(refreshedOrder) && hasOrderCustomer(refreshedOrder)) {
+          liveOrdersById.set(String(order.id), refreshedOrder);
+          refreshedCount += 1;
+        } else {
+          enrichmentPage.push({ order: refreshedOrder, isNew: false });
+        }
+      } else {
+        enrichmentPage.push({ order, isNew: true });
+      }
     }
 
-    if (!missingPage.length) {
-      exhausted = page.length < actualBatchSize;
-      break;
-    }
-
-    const importPage = missingPage.slice(0, Math.max(maxOrders - newOrders.length, 0));
-    importTotal += importPage.length;
-
-    onProgress({
-      phase: 'enriching',
-      foundCount: totalFound,
-      savedCount,
-      processedCount,
-      importTotal,
-      offset,
-      batchSize: actualBatchSize,
-      lastBatchCount,
-      maxOrders,
-      filters,
-    });
-
-    const enrichedPage = await enrichOrderSummaries(client, importPage, importPage.length, ({ processedInBatch }) => {
-      processedCount = newOrders.length + processedInBatch;
+    if (enrichmentPage.length) {
+      importTotal += enrichmentPage.length;
       onProgress({
         phase: 'enriching',
         foundCount: totalFound,
-        savedCount,
+        savedCount: liveOrdersById.size,
         processedCount,
         importTotal,
         offset,
@@ -1214,17 +1297,41 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
         maxOrders,
         filters,
       });
-    });
-    for (const order of enrichedPage) {
-      existingIds.add(String(order.id));
-      newOrders.push(order);
+
+      const processedBeforePage = processedCount;
+      const enrichedPage = await enrichOrderSummaries(
+        client,
+        enrichmentPage.map((entry) => entry.order),
+        enrichmentPage.length,
+        ({ processedInBatch }) => {
+          processedCount = processedBeforePage + processedInBatch;
+          onProgress({
+            phase: 'enriching',
+            foundCount: totalFound,
+            savedCount: liveOrdersById.size,
+            processedCount,
+            importTotal,
+            offset,
+            batchSize: actualBatchSize,
+            lastBatchCount,
+            maxOrders,
+            filters,
+          });
+        },
+      );
+      for (let index = 0; index < enrichedPage.length; index += 1) {
+        const order = enrichedPage[index];
+        liveOrdersById.set(String(order.id), order);
+        if (enrichmentPage[index].isNew) newCount += 1;
+        else refreshedCount += 1;
+      }
     }
-    processedCount = newOrders.length;
+    offset += page.length;
 
     onProgress({
       phase: 'saving',
       foundCount: totalFound,
-      savedCount: Math.min(existingOrders.length + newOrders.length, maxOrders),
+      savedCount: liveOrdersById.size,
       processedCount,
       importTotal,
       offset,
@@ -1234,17 +1341,28 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
       filters,
     });
 
+    if (!page.length) {
+      exhausted = true;
+      break;
+    }
     if (page.length < actualBatchSize) {
       exhausted = true;
       break;
     }
-    offset += page.length;
   }
 
-  const mergedOrders = dedupeOrdersById(
-    sortOrdersDesc([...newOrders, ...refreshedOrders, ...existingOrders]),
-  ).slice(0, maxOrders);
-  const hasMore = !exhausted && mergedOrders.length >= maxOrders;
+  const mergedOrders = sortOrdersDesc([...liveOrdersById.values()]).slice(0, maxOrders);
+  let hasMore = !exhausted && scannedIds.size >= maxOrders;
+  if (!exhausted && scannedIds.size >= maxOrders) {
+    try {
+      const { page: nextPage } = await listOrdersPageAdaptive(client, filters, { offset, limit: 1 });
+      hasMore = nextPage.length > 0;
+      exhausted = !hasMore;
+    } catch (error) {
+      hasMore = true;
+      console.warn('Controllo finale della sincronizzazione incrementale non riuscito:', errorMessage(error));
+    }
+  }
   const cache = {
     syncedAt: new Date().toISOString(),
     filters,
@@ -1253,8 +1371,8 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     hasMore,
     totalFound: hasMore ? null : mergedOrders.length,
     syncMode: 'incremental',
-    newCount: newOrders.length,
-    refreshedCount: refreshedOrders.length,
+    newCount,
+    refreshedCount,
     orders: mergedOrders,
   };
 
@@ -1265,8 +1383,8 @@ async function syncOrderCacheIncremental(config = null, onProgress = () => {}) {
     savedCount: mergedOrders.length,
     processedCount,
     importTotal,
-    newCount: newOrders.length,
-    refreshedCount: refreshedOrders.length,
+    newCount,
+    refreshedCount,
     batchSize,
     lastBatchCount,
     maxOrders,
@@ -1306,7 +1424,18 @@ function publicSyncJob(job) {
 
 function startOrderCacheSyncJob(config, options = {}) {
   const activeJob = orderCacheSyncJobs.get(activeOrderCacheSyncJobId);
-  if (activeJob?.status === 'running') return activeJob;
+  if (activeJob?.status === 'running') {
+    if (options.queueIfBusy) {
+      pendingOrderCacheSync = {
+        config,
+        options: {
+          ...options,
+          queueIfBusy: false,
+        },
+      };
+    }
+    return activeJob;
+  }
 
   const incremental = Boolean(options.incremental);
   const job = {
@@ -1358,6 +1487,10 @@ function startOrderCacheSyncJob(config, options = {}) {
       batchSize: cache.batchSize,
       maxOrders: cache.maxOrders,
     });
+    if (job.trigger === 'hourly') {
+      orderCacheHourlyLastSuccessAt = cache.syncedAt;
+      orderCacheHourlyLastError = '';
+    }
   }).catch((error) => {
     const message = errorMessage(error, 'Sincronizzazione ordini non riuscita.');
     console.error('Sincronizzazione ordini non riuscita:', message);
@@ -1367,9 +1500,14 @@ function startOrderCacheSyncJob(config, options = {}) {
       error: message,
       finishedAt: new Date().toISOString(),
     });
+    if (job.trigger === 'hourly') orderCacheHourlyLastError = message;
   }).finally(() => {
     if (activeOrderCacheSyncJobId === job.id) activeOrderCacheSyncJobId = '';
-    setTimeout(() => orderCacheSyncJobs.delete(job.id), 10 * 60 * 1000);
+    const cleanupTimer = setTimeout(() => orderCacheSyncJobs.delete(job.id), 10 * 60 * 1000);
+    cleanupTimer.unref?.();
+    const pending = pendingOrderCacheSync;
+    pendingOrderCacheSync = null;
+    if (pending) startOrderCacheSyncJob(pending.config, pending.options);
   });
 
   return job;
@@ -1377,39 +1515,73 @@ function startOrderCacheSyncJob(config, options = {}) {
 
 async function runHourlyOrderCacheSync() {
   const config = await getConfig();
-  orderCacheHourlyLastRunAt = new Date().toISOString();
-  orderCacheHourlyNextRunAt = new Date(Date.now() + orderCacheHourlyIntervalMs).toISOString();
-
   if (!config.cacheHourlySync || !config.baseUrl || !config.apiKey || !config.orderStates.length) return null;
 
   const activeJob = orderCacheSyncJobs.get(activeOrderCacheSyncJobId);
   if (activeJob?.status === 'running') return activeJob;
 
-  return startOrderCacheSyncJob(config, {
+  orderCacheHourlyLastRunAt = new Date().toISOString();
+  const job = startOrderCacheSyncJob(config, {
     incremental: true,
     trigger: 'hourly',
   });
+  orderCacheHourlyLastJobId = job.id;
+  return job;
+}
+
+function stopOrderCacheHourlySchedule() {
+  if (orderCacheHourlyTimer) {
+    clearTimeout(orderCacheHourlyTimer);
+    orderCacheHourlyTimer = null;
+  }
+  orderCacheHourlyNextRunAt = '';
+}
+
+function scheduleNextHourlyOrderCacheSync(delayMs = orderCacheHourlyIntervalMs) {
+  stopOrderCacheHourlySchedule();
+  const cleanDelay = Math.max(Math.trunc(Number(delayMs || orderCacheHourlyIntervalMs)), 50);
+  orderCacheHourlyNextRunAt = new Date(Date.now() + cleanDelay).toISOString();
+  orderCacheHourlyTimer = setTimeout(async () => {
+    orderCacheHourlyTimer = null;
+    orderCacheHourlyNextRunAt = '';
+    try {
+      const job = await runHourlyOrderCacheSync();
+      const retryBecauseBusy = job?.status === 'running' && job.trigger !== 'hourly';
+      scheduleNextHourlyOrderCacheSync(
+        retryBecauseBusy ? Math.min(60 * 1000, orderCacheHourlyIntervalMs) : orderCacheHourlyIntervalMs,
+      );
+    } catch (error) {
+      orderCacheHourlyLastError = errorMessage(error);
+      console.error('Aggiornamento orario degli ordini non riuscito:', orderCacheHourlyLastError);
+      scheduleNextHourlyOrderCacheSync(orderCacheHourlyIntervalMs);
+    }
+  }, cleanDelay);
+  orderCacheHourlyTimer.unref?.();
 }
 
 async function refreshOrderCacheHourlySchedule(config = null) {
-  if (orderCacheHourlyTimer) {
-    clearInterval(orderCacheHourlyTimer);
-    orderCacheHourlyTimer = null;
-  }
+  stopOrderCacheHourlySchedule();
 
   const effectiveConfig = config || await getConfig();
   if (!effectiveConfig.cacheHourlySync) {
-    orderCacheHourlyNextRunAt = '';
     return;
   }
 
-  orderCacheHourlyNextRunAt = new Date(Date.now() + orderCacheHourlyIntervalMs).toISOString();
-  orderCacheHourlyTimer = setInterval(() => {
-    runHourlyOrderCacheSync().catch((error) => {
-      console.error('Aggiornamento orario degli ordini non riuscito:', errorMessage(error));
-    });
-  }, orderCacheHourlyIntervalMs);
-  orderCacheHourlyTimer.unref?.();
+  if (!effectiveConfig.baseUrl || !effectiveConfig.apiKey || !effectiveConfig.orderStates.length) {
+    orderCacheHourlyLastError = 'Sincronizzazione oraria non pianificata: configura PrestaShop e almeno uno stato ordine.';
+    return;
+  }
+
+  const cache = await readOrderCache();
+  if (!orderCacheHourlyLastSuccessAt && cache.syncedAt) orderCacheHourlyLastSuccessAt = cache.syncedAt;
+  const lastSyncTime = Date.parse(cache.syncedAt || '');
+  const remaining = Number.isFinite(lastSyncTime)
+    ? orderCacheHourlyIntervalMs - (Date.now() - lastSyncTime)
+    : 0;
+  const initialDelay = remaining > 0
+    ? remaining
+    : Math.min(1000, orderCacheHourlyIntervalMs);
+  scheduleNextHourlyOrderCacheSync(initialDelay);
 }
 
 function randomToken() {
@@ -1649,10 +1821,24 @@ app.post('/api/settings', asyncRoute(async (req, res) => {
     appPassword: effectiveAppPassword,
   });
 
-  await refreshOrderCacheHourlySchedule();
+  const savedConfig = await getConfig();
+  await refreshOrderCacheHourlySchedule(savedConfig);
+  let syncJob = null;
+  if (savedConfig.cacheAutoSync && savedConfig.orderStates.length) {
+    const cache = await readOrderCache();
+    syncJob = startOrderCacheSyncJob(savedConfig, {
+      incremental: cache.orders.length > 0 && cacheMatchesConfig(cache, savedConfig),
+      trigger: 'settings',
+      queueIfBusy: true,
+    });
+  }
   if (passwordChanged) sessions.clear();
 
-  res.json({ ok: true, reauthRequired: passwordChanged });
+  res.json({
+    ok: true,
+    reauthRequired: passwordChanged,
+    syncJob: publicSyncJob(syncJob),
+  });
 }));
 
 app.get('/api/integration-tokens', asyncRoute(async (req, res) => {
@@ -1735,7 +1921,11 @@ app.get('/api/order-cache/status', asyncRoute(async (req, res) => {
     hourlySync: {
       enabled: Boolean((await getConfig()).cacheHourlySync),
       intervalMinutes: Math.round(orderCacheHourlyIntervalMs / 60000),
+      intervalMs: orderCacheHourlyIntervalMs,
       lastRunAt: orderCacheHourlyLastRunAt,
+      lastSuccessAt: orderCacheHourlyLastSuccessAt,
+      lastError: orderCacheHourlyLastError,
+      lastJobId: orderCacheHourlyLastJobId,
       nextRunAt: orderCacheHourlyNextRunAt,
     },
   });
@@ -1808,8 +1998,8 @@ app.get('/api/orders', asyncRoute(async (req, res) => {
   };
   const effectiveFilters = {
     orderStates: requestedOrderStates.length ? requestedOrderStates : config.orderStates,
-    orderDateFrom: quickFilters.orderDateFrom || config.orderDateFrom,
-    orderDateTo: quickFilters.orderDateTo || config.orderDateTo,
+    orderDateFrom: quickFilters.orderDateFrom || (query ? '' : config.orderDateFrom),
+    orderDateTo: quickFilters.orderDateTo || (query ? '' : config.orderDateTo),
     orderLimit: requestedLimit,
   };
   const canUseCache = cache.orders.length && cacheMatchesConfig(cache, config);
@@ -1890,13 +2080,15 @@ app.get('/api/orders', asyncRoute(async (req, res) => {
   ]).slice(0, requestedLimit);
 
   if (query && canUseCache && enrichedLiveOrders.length) {
-    const updatedCache = {
-      ...cache,
-      orders: dedupeOrdersById(
-        sortOrdersDesc([...enrichedLiveOrders, ...cache.orders]),
-      ).slice(0, cleanMaxCacheOrders(config.cacheMaxOrders)),
-    };
-    await writeOrderCache(updatedCache);
+    await mutateOrderCache((latestCache) => {
+      if (!cacheMatchesConfig(latestCache, config)) return null;
+      return {
+        ...latestCache,
+        orders: dedupeOrdersById(
+          sortOrdersDesc([...enrichedLiveOrders, ...latestCache.orders]),
+        ).slice(0, cleanMaxCacheOrders(config.cacheMaxOrders)),
+      };
+    });
   }
 
   res.json({
@@ -2314,6 +2506,7 @@ async function startServer({ host = bindHost, listenPort = port } = {}) {
       }
       resolve(server);
     });
+    server.once('close', stopOrderCacheHourlySchedule);
     server.once('error', reject);
   });
 }

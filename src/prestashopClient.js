@@ -57,6 +57,7 @@ function mapOrderSummary(order) {
     reference: textValue(order.reference),
     customerId: textValue(order.id_customer),
     dateAdd: textValue(order.date_add),
+    dateUpd: textValue(order.date_upd),
     totalPaid: textValue(order.total_paid),
     currentState: textValue(order.current_state),
     products: mapOrderRowsSummary(order),
@@ -144,8 +145,8 @@ function addOrderFilters(params, filters = {}) {
   return next;
 }
 
-function isWebserviceServerError(error) {
-  return Number(error?.status || 0) >= 500;
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export class PrestashopClient {
@@ -153,6 +154,7 @@ export class PrestashopClient {
     this.baseUrl = cleanBaseUrl(baseUrl);
     this.apiKey = apiKey;
     this.languageId = languageId;
+    this.orderStatePageCache = new Map();
 
     if (!this.baseUrl || !this.apiKey) {
       throw new Error('PRESTASHOP_URL e PRESTASHOP_API_KEY sono obbligatori.');
@@ -233,24 +235,31 @@ export class PrestashopClient {
   }
 
   async searchOrders(query, filters = {}) {
-    const trimmed = String(query || '').trim();
+    const trimmed = String(query || '')
+      .trim()
+      .replace(/^#\s*/, '')
+      .replace(/^(?:ordine|order)\s+/i, '')
+      .trim();
     if (!trimmed) return [];
-
-    const baseParams = addOrderFilters({
-      display: '[id,reference,id_customer,date_add,total_paid,current_state]',
-      sort: '[id_DESC]',
-    }, filters);
 
     const found = [];
 
     if (/^\d+$/.test(trimmed)) {
-      try {
-        const order = await this.get('orders', trimmed);
-        if (order?.id) {
-          return [mapOrderSummary(order)];
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const order = await this.get('orders', trimmed, { timeoutMs: 20000 });
+          if (order?.id) {
+            return [mapOrderSummary(order)];
+          }
+        } catch (error) {
+          const status = Number(error?.status || 0);
+          const retryable = status === 404 || status >= 500 || String(error?.message || '').includes('non ha risposto');
+          if (!retryable || attempt === 2) {
+            if (status !== 404) throw error;
+            break;
+          }
         }
-      } catch (error) {
-        if (!String(error?.message || '').includes('404')) throw error;
+        await wait(150 * (attempt + 1));
       }
     }
 
@@ -261,12 +270,21 @@ export class PrestashopClient {
     ];
 
     for (const referenceFilter of referenceFilters) {
-      const orders = await this.list('orders', {
-        ...baseParams,
-        'filter[reference]': referenceFilter,
-      });
-      found.push(...orders);
-      if (orders.length > 0) break;
+      const states = cleanOrderStates(filters);
+      const filterSets = states.length > 1
+        ? states.map((orderState) => ({ ...filters, orderStates: [orderState] }))
+        : [filters];
+      const pages = await Promise.all(filterSets.map(async (stateFilters) => {
+        const params = addOrderFilters({
+          display: '[id,reference,id_customer,date_add,date_upd,total_paid,current_state]',
+          sort: '[id_DESC]',
+        }, stateFilters);
+        params['filter[reference]'] = referenceFilter;
+        params.limit = cleanLimit(filters.orderLimit);
+        return this.list('orders', params);
+      }));
+      found.push(...pages.flat());
+      if (pages.some((orders) => orders.length > 0)) break;
     }
 
     return uniqueById(found).map(mapOrderSummary).slice(0, cleanLimit(filters.orderLimit));
@@ -283,55 +301,78 @@ export class PrestashopClient {
 
   async listOrdersPage(filters = {}, { offset = 0, limit = 50 } = {}) {
     const batchLimit = Math.min(Math.max(Math.trunc(Number(limit || 50)), 1), 100);
-    const params = addOrderFilters({
-      display: '[id,reference,id_customer,date_add,total_paid,current_state]',
-      sort: '[id_DESC]',
-    }, {
-      ...filters,
-      orderLimit: `${Math.max(Math.trunc(Number(offset || 0)), 0)},${batchLimit}`,
-    });
-    params.limit = `${Math.max(Math.trunc(Number(offset || 0)), 0)},${batchLimit}`;
-    try {
-      const orders = await this.list('orders', params, { timeoutMs: 60000 });
-      return orders.map(mapOrderSummary);
-    } catch (error) {
-      const states = cleanOrderStates(filters);
-      if (!isWebserviceServerError(error) || states.length <= 1) throw error;
-      return this.listOrdersPageByState(filters, { offset, limit: batchLimit });
-    }
+    return this.listOrdersPageByState(filters, { offset, limit: batchLimit });
   }
 
   async listOrdersPageByState(filters = {}, { offset = 0, limit = 50 } = {}) {
     const states = cleanOrderStates(filters);
     if (!states.length) throw new Error('Nessuno stato ordine valido per la sincronizzazione.');
 
-    const perStateLimit = Math.min(Math.max(Math.trunc(Number(offset || 0)) + Math.trunc(Number(limit || 50)), 1), 100);
-    const settledPages = await Promise.allSettled(states.map(async (orderState) => {
-      const params = addOrderFilters({
-        display: '[id,reference,id_customer,date_add,total_paid,current_state]',
-        sort: '[id_DESC]',
-      }, {
-        ...filters,
-        orderStates: [orderState],
-        orderLimit: `0,${perStateLimit}`,
-      });
-      params.limit = `0,${perStateLimit}`;
-      const orders = await this.list('orders', params, { timeoutMs: 60000 });
-      return orders.map(mapOrderSummary);
+    const cleanOffset = Math.max(Math.trunc(Number(offset || 0)), 0);
+    const cleanPageLimit = Math.min(Math.max(Math.trunc(Number(limit || 50)), 1), 100);
+    const requiredPerState = cleanOffset + cleanPageLimit;
+    const cacheKey = JSON.stringify({
+      states: [...states].sort(),
+      dateFrom: String(filters.orderDateFrom || ''),
+      dateTo: String(filters.orderDateTo || ''),
+    });
+    if (!this.orderStatePageCache.has(cacheKey)) this.orderStatePageCache.set(cacheKey, new Map());
+    const stateCache = this.orderStatePageCache.get(cacheKey);
+    const pages = await Promise.all(states.map(async (orderState) => {
+      if (!stateCache.has(orderState)) {
+        stateCache.set(orderState, {
+          orders: [],
+          exhausted: false,
+          nextMaximumId: '',
+        });
+      }
+      const cachedState = stateCache.get(orderState);
+      const stateOrders = cachedState.orders;
+
+      while (stateOrders.length < requiredPerState && !cachedState.exhausted) {
+        const requestLimit = Math.min(100, requiredPerState - stateOrders.length);
+        const params = addOrderFilters({
+          display: '[id,reference,id_customer,date_add,date_upd,total_paid,current_state]',
+          sort: '[id_DESC]',
+        }, {
+          ...filters,
+          orderStates: [orderState],
+        });
+        // La scansione per cursore resta stabile se vengono creati nuovi ordini
+        // mentre il job è in corso. Con offset, un inserimento in testa sposta
+        // tutte le pagine successive e può far saltare un ordine.
+        if (cachedState.nextMaximumId) {
+          params['filter[id]'] = `[1,${cachedState.nextMaximumId}]`;
+        }
+        params.limit = requestLimit;
+        const orders = await this.list('orders', params, { timeoutMs: 60000 });
+        const mappedOrders = orders.map(mapOrderSummary);
+        const knownIds = new Set(stateOrders.map((order) => String(order.id)));
+        const newOrders = mappedOrders.filter((order) => order.id && !knownIds.has(String(order.id)));
+        stateOrders.push(...newOrders);
+        const minimumId = mappedOrders.reduce((minimum, order) => {
+          const id = Number(order.id);
+          return Number.isSafeInteger(id) && id > 0 ? Math.min(minimum, id) : minimum;
+        }, Number.POSITIVE_INFINITY);
+        cachedState.nextMaximumId = Number.isFinite(minimumId) && minimumId > 1
+          ? String(minimumId - 1)
+          : '';
+        if (
+          orders.length < requestLimit
+          || !newOrders.length
+          || !cachedState.nextMaximumId
+        ) {
+          cachedState.exhausted = true;
+        }
+      }
+
+      return stateOrders;
     }));
-    const pages = settledPages
-      .filter((result) => result.status === 'fulfilled')
-      .map((result) => result.value);
 
-    if (!pages.length) {
-      const firstError = settledPages.find((result) => result.status === 'rejected')?.reason;
-      throw firstError || new Error('Nessun ordine scaricato dagli stati configurati.');
-    }
-
-    return pages
+    return uniqueById(pages
       .flat()
-      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
-      .slice(Math.max(Math.trunc(Number(offset || 0)), 0), Math.max(Math.trunc(Number(offset || 0)), 0) + Math.trunc(Number(limit || 50)));
+      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0)))
+      .slice(cleanOffset, cleanOffset + cleanPageLimit);
   }
 
   async getOrderDetails(orderId, options = {}) {
@@ -342,6 +383,7 @@ export class PrestashopClient {
       id: textValue(order.id),
       reference: textValue(order.reference),
       customerId: textValue(order.id_customer),
+      dateUpd: textValue(order.date_upd),
       rows: rows.map((row) => ({
         id: textValue(row.id),
         productId: textValue(row.product_id),

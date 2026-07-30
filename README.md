@@ -95,10 +95,21 @@ La sincronizzazione:
 
 - usa gli stati e l'intervallo date configurati
 - scarica ordini a batch configurabili tra 50 e 100
+- pagina separatamente ogni stato attivo, senza perdere gli ordini oltre i primi 100
+- durante gli aggiornamenti incrementali attraversa tutta la finestra configurata e recupera eventuali buchi
+- riprova e completa automaticamente prodotti o clienti rimasti incompleti per errori temporanei
 - puo partire automaticamente all'avvio e dopo il salvataggio impostazioni
+- se l'aggiornamento orario è attivo, recupera all'avvio una sincronizzazione scaduta senza attendere un'altra ora
+- impedisce la sovrapposizione tra sincronizzazioni manuali e pianificate
 - mostra durante l’importazione quanti ordini sono già stati elaborati e quanti sono in attesa
+- mostra nelle impostazioni ultimo aggiornamento riuscito, prossima esecuzione ed eventuali errori dello scheduler
 - rende gli ordini disponibili alla ricerca quando i filtri correnti coincidono con quelli configurati
 - salva tecnicamente i dati in `order-cache.json`, ignorato da Git
+
+La ricerca combina cache e PrestaShop. Quando inserisci un ID o un riferimento,
+la consultazione diretta non è limitata dall'intervallo date usato per la
+sincronizzazione; restano invece rispettati gli stati ordine abilitati e le
+eventuali date inserite esplicitamente nel modulo di ricerca.
 
 ## Anteprima prodotti da CSV
 

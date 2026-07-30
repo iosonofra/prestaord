@@ -413,6 +413,8 @@ function App() {
   const [logsError, setLogsError] = useState('');
   const [successResult, setSuccessResult] = useState(null);
   const orderSearchSequence = useRef(0);
+  const requestRef = useRef(request);
+  requestRef.current = request;
 
   const selectedRowObjects = useMemo(() => {
     return [...selectedOrders.values()]
@@ -525,6 +527,23 @@ function App() {
     bootstrap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (locked) return undefined;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const nextStatus = await requestRef.current('/api/order-cache/status');
+        if (!cancelled) setCacheStatus(nextStatus);
+      } catch (error) {
+        if (!cancelled && error.status === 401) setLocked(true);
+      }
+    }, 30 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [locked]);
 
   useEffect(() => {
     const activeSync = cacheStatus?.activeSync;
@@ -1242,6 +1261,7 @@ function App() {
           <SettingsPage
             settings={settings}
             orderStates={orderStates}
+            cacheStatus={cacheStatus}
             busy={busy}
             templateStatus={templateStatus}
             onSave={saveSettings}
@@ -2104,6 +2124,7 @@ export function ReviewPanel(props) {
 export function SettingsPage({
   settings,
   orderStates,
+  cacheStatus = null,
   busy,
   templateStatus = null,
   onSave,
@@ -2115,6 +2136,7 @@ export function SettingsPage({
   onDeleteIntegrationToken = async () => null,
 }) {
   const selectedStateSet = new Set((settings.orderStates || []).map(String));
+  const hourlySync = cacheStatus?.hourlySync || {};
   const [replaceApiKey, setReplaceApiKey] = useState(!settings.apiKeyConfigured);
   const [templateFile, setTemplateFile] = useState(null);
   const [templateImportFeedback, setTemplateImportFeedback] = useState({ tone: '', text: '' });
@@ -2394,6 +2416,20 @@ export function SettingsPage({
                 <span><strong>Aggiornamento ogni ora</strong><small>Mantiene automaticamente aggiornati gli ordini sincronizzati.</small></span>
               </label>
             </div>
+            {settings.cacheHourlySync ? (
+              <div className={cx('hourlySchedulerStatus', hourlySync.lastError && 'error')} role="status">
+                <span className="hourlySchedulerIcon"><FileClock aria-hidden="true" /></span>
+                <div>
+                  <strong>{hourlySync.lastError ? 'Sincronizzazione oraria da controllare' : hourlySync.lastSuccessAt ? 'Sincronizzazione oraria attiva' : 'Prima sincronizzazione pianificata'}</strong>
+                  {hourlySync.lastError ? <small>{hourlySync.lastError}</small> : (
+                    <small>
+                      {hourlySync.lastSuccessAt ? `Ultimo aggiornamento ${shortDate(hourlySync.lastSuccessAt)}` : 'Nessuna esecuzione completata'}
+                      {hourlySync.nextRunAt ? ` · Prossimo controllo ${shortDate(hourlySync.nextRunAt)}` : ''}
+                    </small>
+                  )}
+                </div>
+              </div>
+            ) : null}
             <div className="settingsInlineAction">
               <div><strong>Sincronizzazione manuale</strong><small>Avvia ora un aggiornamento senza salvare altre modifiche.</small></div>
               <IconButton type="button" icon={Database} busy={busy === 'cache'} onClick={onSyncCache}>Sincronizza ora</IconButton>

@@ -27,14 +27,42 @@
   }
 
   function detectOrderId(location = global.location, document = global.document) {
-    const url = new URL(location.href);
-    const queryId = url.searchParams.get('id_order') || url.searchParams.get('orderId');
+    let url;
+    try {
+      url = new URL(location.href);
+    } catch {
+      return '';
+    }
+    const queryId = url.searchParams.get('id_order')
+      || url.searchParams.get('orderId')
+      || url.searchParams.get('idOrder');
     if (/^\d+$/.test(queryId || '')) return queryId;
-    const pathMatch = url.pathname.match(/(?:orders?|sell\/orders)\/(\d+)(?:\/view)?/i);
+    const route = `${url.pathname}${url.hash}`;
+    const pathMatch = route.match(/(?:orders?|sell\/orders)[/=](\d+)(?:\/view)?/i);
     if (pathMatch) return pathMatch[1];
-    const candidate = document.querySelector('[data-order-id],input[name="id_order"]');
-    const domId = candidate?.dataset?.orderId || candidate?.value;
-    return /^\d+$/.test(domId || '') ? domId : '';
+    const hashQuery = url.hash.includes('?')
+      ? new URLSearchParams(url.hash.slice(url.hash.indexOf('?') + 1))
+      : new URLSearchParams(url.hash.replace(/^#/, ''));
+    const hashId = hashQuery.get('id_order') || hashQuery.get('orderId') || hashQuery.get('idOrder');
+    if (/^\d+$/.test(hashId || '')) return hashId;
+
+    const candidates = document.querySelectorAll([
+      '[data-order-id]',
+      '[data-id-order]',
+      'input[name="id_order"]',
+      'input[name="orderId"]',
+      'input[name="idOrder"]',
+      '#id_order',
+    ].join(','));
+    for (const candidate of candidates) {
+      const domId = candidate.dataset?.orderId
+        || candidate.dataset?.idOrder
+        || candidate.getAttribute?.('data-order-id')
+        || candidate.getAttribute?.('data-id-order')
+        || candidate.value;
+      if (/^\d+$/.test(String(domId || '').trim())) return String(domId).trim();
+    }
+    return '';
   }
 
   function findOrderHeading(document) {
@@ -49,8 +77,14 @@
   }
 
   function mount({ api, orderId = detectOrderId(), onConfigure = null }) {
-    if (!orderId || document.querySelector('presta-order-console')) return null;
+    const existingHost = document.querySelector('presta-order-console');
+    if (!orderId) return null;
+    if (existingHost?.dataset?.orderId === String(orderId)) {
+      return { host: existingHost, orderId: String(orderId) };
+    }
+    existingHost?.remove();
     const host = document.createElement('presta-order-console');
+    host.dataset.orderId = String(orderId);
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `<style>${STYLE}</style>
       <button class="launcher" type="button" aria-label="Sostituisci prodotto nell’ordine" title="Sostituisci prodotto">
@@ -59,7 +93,7 @@
       </button>
       <div class="overlay hidden">
         <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="prestaOrderDialogTitle">
-          <header class="head"><div><h2 id="prestaOrderDialogTitle">Ordine <span data-order></span></h2><p>Sostituzione prodotto guidata · integrazione v1.3.3</p></div><button class="iconbtn close" aria-label="Chiudi">×</button></header>
+          <header class="head"><div><h2 id="prestaOrderDialogTitle">Ordine <span data-order></span></h2><p>Sostituzione prodotto guidata · integrazione v__INTEGRATION_VERSION__</p></div><button class="iconbtn close" aria-label="Chiudi">×</button></header>
           <div class="workflowProgress" aria-label="Avanzamento sostituzione">
             <div class="progressStep active" data-progress="rows"><span class="progressIndex">1</span><span class="progressLabel">Righe</span></div>
             <div class="progressStep" data-progress="product"><span class="progressIndex">2</span><span class="progressLabel">Prodotto</span></div>
@@ -484,9 +518,61 @@
     return { host, orderId };
   }
 
+  function watch(options) {
+    let stopped = false;
+    let scheduled = false;
+    let observer = null;
+    let timer = null;
+
+    const reconcile = () => {
+      scheduled = false;
+      if (stopped) return;
+      const orderId = detectOrderId();
+      const existingHost = global.document.querySelector('presta-order-console');
+      if (!orderId) {
+        existingHost?.remove();
+        return;
+      }
+      if (existingHost?.dataset?.orderId === String(orderId)) return;
+      mount({ ...options, orderId });
+    };
+
+    const schedule = () => {
+      if (stopped || scheduled) return;
+      scheduled = true;
+      global.setTimeout(reconcile, 0);
+    };
+
+    if (global.MutationObserver && global.document.documentElement) {
+      observer = new global.MutationObserver(schedule);
+      observer.observe(global.document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-order-id', 'data-id-order', 'value'],
+      });
+    }
+    global.addEventListener?.('popstate', schedule);
+    global.addEventListener?.('hashchange', schedule);
+    global.addEventListener?.('urlchange', schedule);
+    timer = global.setInterval(reconcile, 1000);
+    reconcile();
+
+    return {
+      stop() {
+        stopped = true;
+        observer?.disconnect();
+        global.clearInterval(timer);
+        global.removeEventListener?.('popstate', schedule);
+        global.removeEventListener?.('hashchange', schedule);
+        global.removeEventListener?.('urlchange', schedule);
+      },
+    };
+  }
+
   function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
   }
 
-  global.PrestaOrderPanel = { mount, detectOrderId };
+  global.PrestaOrderPanel = { mount, watch, detectOrderId };
 })(globalThis);

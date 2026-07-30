@@ -54,4 +54,4 @@ function api(action, payload = {}) {
 }
 
 GM_registerMenuCommand('Configura PrestaShop Order Console', configure);
-PrestaOrderPanel.mount({ api, onConfigure: configure });
+PrestaOrderPanel.watch({ api, onConfigure: configure });

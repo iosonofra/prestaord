@@ -20,6 +20,8 @@ Il token può usare soltanto le API operative necessarie all’integrazione. Non
 
 ## Chrome
 
+La versione corrente dell’integrazione è **1.3.5**.
+
 1. Scarica `chrome.zip` dalle impostazioni della web app.
 2. Estrai l’archivio in una cartella stabile.
 3. Apri `chrome://extensions`.
@@ -33,6 +35,8 @@ Il token può usare soltanto le API operative necessarie all’integrazione. Non
 
 Per una distribuzione Chrome gestita o pubblica, il pacchetto deve essere firmato/pubblicato tramite Chrome Web Store.
 
+Per aggiornare un’installazione non pacchettizzata, sostituisci i file nella cartella stabile e premi **Ricarica** nella scheda `chrome://extensions`.
+
 ## Firefox
 
 1. Scarica `firefox.zip`.
@@ -44,11 +48,15 @@ Un’estensione Firefox installabile in modo permanente deve essere firmata tram
 
 ## Userscript
 
+La versione corrente dello userscript è **1.3.5**.
+
 1. Installa un gestore userscript compatibile, per esempio Tampermonkey o Violentmonkey.
 2. Apri dalla web app **Installa userscript**.
 3. Dal menu del gestore esegui **Configura PrestaShop Order Console**.
 4. Inserisci URL web app e token.
 5. Ricarica la pagina ordine.
+
+Se era già installato, apri il nuovo file `.user.js`: il gestore riconoscerà la versione superiore e proporrà l’aggiornamento mantenendo la configurazione salvata.
 
 ## Uso senza Cloudflare Access
 
@@ -61,8 +69,11 @@ Il token protegge l’autorizzazione ma HTTP non cifra il traffico. Se la web ap
 L’integrazione riconosce l’ID da:
 
 - parametro `id_order`;
-- parametro `orderId`;
+- parametri `orderId` e `idOrder`;
 - URL nel formato `/orders/123/view`;
+- percorsi o parametri presenti dopo `#` nelle pagine con navigazione dinamica;
 - attributo `data-order-id` o campo `id_order` della pagina.
+
+Il rilevamento resta attivo anche dopo il caricamento iniziale: intercetta modifiche del DOM, cambi URL e navigazioni dinamiche del back office senza richiedere più tentativi o ricaricamenti manuali.
 
 Se il pulsante **Modifica prodotti** non compare su una specifica versione del back office, occorre aggiungere il relativo formato URL al rilevatore condiviso in `integrations/shared/panel.js`.

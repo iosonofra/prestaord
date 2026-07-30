@@ -1,5 +1,5 @@
 const prestaOrderExtension = globalThis.browser || globalThis.chrome;
-PrestaOrderPanel.mount({
+PrestaOrderPanel.watch({
   api(action, payload = {}) {
     return prestaOrderExtension.runtime.sendMessage({ type: 'presta-order-api', action, payload })
       .then((result) => {
