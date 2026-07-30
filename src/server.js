@@ -1997,14 +1997,21 @@ app.get('/api/orders', asyncRoute(async (req, res) => {
     orderDateTo: String(req.query.dateTo || '').trim(),
   };
   const effectiveFilters = {
-    orderStates: requestedOrderStates.length ? requestedOrderStates : config.orderStates,
+    // Una ricerca esplicita senza stato è globale: gli stati configurati
+    // delimitano sincronizzazione e lista iniziale, non la possibilità di
+    // trovare un ordine noto per ID, riferimento o cliente.
+    orderStates: requestedOrderStates.length
+      ? requestedOrderStates
+      : query
+        ? []
+        : config.orderStates,
     orderDateFrom: quickFilters.orderDateFrom || (query ? '' : config.orderDateFrom),
     orderDateTo: quickFilters.orderDateTo || (query ? '' : config.orderDateTo),
     orderLimit: requestedLimit,
   };
   const canUseCache = cache.orders.length && cacheMatchesConfig(cache, config);
   const cacheOrders = canUseCache
-    ? cache.orders.filter((order) => orderMatchesQueryFilters(order, quickFilters))
+    ? cache.orders.filter((order) => orderMatchesQueryFilters(order, effectiveFilters))
     : [];
 
   if (sourceMode === 'cache') {
@@ -2080,12 +2087,16 @@ app.get('/api/orders', asyncRoute(async (req, res) => {
   ]).slice(0, requestedLimit);
 
   if (query && canUseCache && enrichedLiveOrders.length) {
+    const cacheableLiveOrders = enrichedLiveOrders.filter((order) => orderMatchesQueryFilters(order, {
+      orderStates: config.orderStates,
+    }));
     await mutateOrderCache((latestCache) => {
       if (!cacheMatchesConfig(latestCache, config)) return null;
+      if (!cacheableLiveOrders.length) return null;
       return {
         ...latestCache,
         orders: dedupeOrdersById(
-          sortOrdersDesc([...enrichedLiveOrders, ...latestCache.orders]),
+          sortOrdersDesc([...cacheableLiveOrders, ...latestCache.orders]),
         ).slice(0, cleanMaxCacheOrders(config.cacheMaxOrders)),
       };
     });

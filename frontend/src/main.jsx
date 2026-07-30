@@ -39,6 +39,7 @@ import { getCanonicalSelectionState } from './canonical-selection.js';
 import {
   getInitialOrderFilters,
   initialFilters,
+  resolveOrderSearchFilters,
   resetOrderSearch,
 } from './order-search-filters.js';
 
@@ -775,18 +776,19 @@ function App() {
   }
 
   async function searchOrders(nextFilters = filters, sessionToken) {
+    const effectiveSearchFilters = resolveOrderSearchFilters(nextFilters, filters);
     const searchSequence = orderSearchSequence.current + 1;
     orderSearchSequence.current = searchSequence;
     await run('orders', async () => {
-      setStatus(nextFilters.q ? 'Cerco in ordini sincronizzati e PrestaShop...' : 'Carico ultimi ordini...');
+      setStatus(effectiveSearchFilters.q ? 'Cerco in ordini sincronizzati e PrestaShop...' : 'Carico ultimi ordini...');
       const params = new URLSearchParams({
-        q: nextFilters.q,
+        q: effectiveSearchFilters.q,
         source: 'auto',
-        limit: nextFilters.limit,
+        limit: effectiveSearchFilters.limit,
       });
-      if (nextFilters.orderState) params.set('orderState', nextFilters.orderState);
-      if (nextFilters.dateFrom) params.set('dateFrom', nextFilters.dateFrom);
-      if (nextFilters.dateTo) params.set('dateTo', nextFilters.dateTo);
+      if (effectiveSearchFilters.orderState) params.set('orderState', effectiveSearchFilters.orderState);
+      if (effectiveSearchFilters.dateFrom) params.set('dateFrom', effectiveSearchFilters.dateFrom);
+      if (effectiveSearchFilters.dateTo) params.set('dateTo', effectiveSearchFilters.dateTo);
       const data = await request(`/api/orders?${params.toString()}`, { sessionToken });
       if (searchSequence !== orderSearchSequence.current) return;
       setOrders(data.orders || []);
@@ -1424,7 +1426,7 @@ function OrdersWorkbench(props) {
         </Field>
         <Field label="Stato">
           <select value={filters.orderState} onChange={(event) => setFilters({ ...filters, orderState: event.target.value })}>
-            <option value="">Tutti gli stati abilitati</option>
+            <option value="">Nessun filtro di stato</option>
             {orderStates.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}
           </select>
         </Field>
@@ -1439,7 +1441,7 @@ function OrdersWorkbench(props) {
             {['20', '50', '100', '250', '500', '1000'].map((value) => <option key={value} value={value}>Primi {value}</option>)}
           </select>
         </Field>
-        <IconButton icon={Search} busy={busy === 'orders'} onClick={onSearchOrders} variant="primary">Cerca</IconButton>
+        <IconButton icon={Search} busy={busy === 'orders'} onClick={() => onSearchOrders(filters)} variant="primary">Cerca</IconButton>
       </div>
 
       <div className="consoleGrid">
